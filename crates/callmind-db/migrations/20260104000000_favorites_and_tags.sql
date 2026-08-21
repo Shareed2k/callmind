@@ -1,0 +1,3 @@
+ALTER TABLE calls ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE calls ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+CREATE INDEX IF NOT EXISTS idx_calls_favorite ON calls(is_favorite);

@@ -1,0 +1,123 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/callmind-core",
+    "crates/callmind-config",
+    "crates/callmind-storage",
+    "crates/callmind-db",
+    "crates/callmind-jobs",
+    "crates/callmind-audio",
+    "crates/callmind-vad",
+    "crates/callmind-language",
+    "crates/callmind-stt",
+    "crates/callmind-diarization",
+    "crates/callmind-transcript",
+    "crates/callmind-llm",
+    "crates/callmind-analysis",
+    "crates/callmind-search",
+    "crates/callmind-ui",
+    "crates/callmind-api",
+    "crates/callmind",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+authors = ["CallMind Team"]
+license = "MIT OR Apache-2.0"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+needless_raw_string_hashes = "allow"
+cast_possible_wrap = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+cast_precision_loss = "allow"
+many_single_char_names = "allow"
+needless_range_loop = "allow"
+default_trait_access = "allow"
+needless_continue = "allow"
+doc_markdown = "allow"
+map_unwrap_or = "allow"
+items_after_statements = "allow"
+needless_pass_by_value = "allow"
+too_many_lines = "allow"
+single_match_else = "allow"
+duration_suboptimal_units = "allow"
+unnested_or_patterns = "allow"
+wildcard_imports = "allow"
+collapsible_if = "allow"
+io_other_error = "allow"
+similar_names = "allow"
+unnecessary_wraps = "allow"
+unnecessary_debug_formatting = "allow"
+manual_let_else = "allow"
+uninlined_format_args = "allow"
+too_many_arguments = "allow"
+
+[workspace.dependencies]
+callmind-core = { path = "crates/callmind-core" }
+callmind-config = { path = "crates/callmind-config" }
+callmind-storage = { path = "crates/callmind-storage" }
+callmind-db = { path = "crates/callmind-db" }
+callmind-jobs = { path = "crates/callmind-jobs" }
+callmind-audio = { path = "crates/callmind-audio" }
+callmind-vad = { path = "crates/callmind-vad" }
+callmind-language = { path = "crates/callmind-language" }
+callmind-stt = { path = "crates/callmind-stt" }
+callmind-diarization = { path = "crates/callmind-diarization" }
+callmind-transcript = { path = "crates/callmind-transcript" }
+callmind-llm = { path = "crates/callmind-llm" }
+callmind-analysis = { path = "crates/callmind-analysis" }
+callmind-search = { path = "crates/callmind-search" }
+callmind-ui = { path = "crates/callmind-ui" }
+callmind-api = { path = "crates/callmind-api" }
+
+tokio = { version = "1.43", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
+axum = { version = "0.8", features = ["multipart", "macros"] }
+tower = { version = "0.5", features = ["util", "timeout"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "limit"] }
+
+symphonia = { version = "0.5", features = ["all"] }
+rubato = "0.16"
+whisper-rs = { version = "0.16", default-features = false }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid", "migrate"] }
+
+uuid = { version = "1.13", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+thiserror = "2.0"
+anyhow = "1.0"
+
+utoipa = { version = "5.3", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
+
+clap = { version = "4.5", features = ["derive", "env"] }
+bytes = "1.10"
+futures-util = "0.3"
+sha2 = "0.10"
+hex = "0.4"
+tempfile = "3.17"
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+html-escape = "0.2"
+whatlang = "0.16"

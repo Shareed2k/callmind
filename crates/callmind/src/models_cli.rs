@@ -1,0 +1,302 @@
+use anyhow::{Context, Result, bail};
+use clap::Subcommand;
+use futures_util::StreamExt;
+use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
+
+#[derive(Subcommand, Debug)]
+pub enum ModelCommands {
+    /// List all registered and available AI models
+    List,
+    /// Download model weights (Whisper GGML, ivrit-ai, LLM GGUF)
+    Download {
+        /// Model identifier to download (e.g. 'whisper-large-v3', 'ivrit-ai-v3', 'qwen-7b', or 'all')
+        #[arg(default_value = "all")]
+        model: String,
+    },
+    /// Verify SHA-256 checksums and presence of downloaded models
+    Verify {
+        /// Model identifier to verify
+        #[arg(default_value = "all")]
+        model: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelSpec {
+    pub id: &'static str,
+    pub kind: &'static str,
+    pub filename: &'static str,
+    pub url: &'static str,
+    pub size_mb: u64,
+    pub sha256: &'static str,
+}
+
+pub const REGISTERED_MODELS: &[ModelSpec] = &[
+    ModelSpec {
+        id: "whisper-large-v3",
+        kind: "STT Multilingual",
+        filename: "stt/whisper-large-v3.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
+        size_mb: 2952,
+        sha256: "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
+    },
+    ModelSpec {
+        id: "ivrit-ai-v3",
+        kind: "STT Hebrew Fine-Tuned",
+        filename: "stt/ivrit-ai-large-v3.bin",
+        url: "https://huggingface.co/ivrit-ai/whisper-large-v3-ggml/resolve/main/ggml-model.bin",
+        size_mb: 2952,
+        sha256: "09e66ec67b2e00c6933afab6684cbf78fe023e8ad153c1848f62000e4335a07f",
+    },
+    ModelSpec {
+        id: "ivrit-ai-turbo",
+        kind: "STT Hebrew Turbo",
+        filename: "stt/ivrit-ai-large-v3-turbo.bin",
+        url: "https://huggingface.co/ivrit-ai/whisper-large-v3-turbo-ggml/resolve/main/ggml-model.bin",
+        size_mb: 1549,
+        sha256: "c8090411113357097bfafc2b8e228ec1639fa7f5fe4ecb5d054ac0ccef8641b1",
+    },
+    ModelSpec {
+        id: "qwen-7b",
+        kind: "LLM Conversation Intelligence",
+        filename: "llm/qwen2.5-7b-instruct-q3_k_m.gguf",
+        url: "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q3_k_m.gguf",
+        size_mb: 3632,
+        sha256: "a96b16179dc6cc9afdf0cf7a96a80c199cbd00b9be207c3465be21cb721cca5e",
+    },
+    ModelSpec {
+        id: "qwen-3b",
+        kind: "LLM Fast / Low-VRAM",
+        filename: "llm/qwen2.5-3b-instruct-q4_k_m.gguf",
+        url: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+        size_mb: 2007,
+        sha256: "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
+    },
+    ModelSpec {
+        id: "diarization-embedding",
+        kind: "Speaker Embedding ONNX",
+        filename: "diarization/speaker_embedding.onnx",
+        url: "https://huggingface.co/wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx",
+        size_mb: 26,
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+    },
+];
+
+pub async fn run_models_command(models_dir: &Path, cmd: ModelCommands) -> Result<()> {
+    tokio::fs::create_dir_all(models_dir).await?;
+
+    match cmd {
+        ModelCommands::List => {
+            println!("=== CallMind Model Registry ===");
+            println!(
+                "{:<22} {:<24} {:<10} {:<15}",
+                "MODEL ID", "KIND", "SIZE", "STATUS"
+            );
+            println!("{:-<75}", "");
+
+            for spec in REGISTERED_MODELS {
+                let target_path = models_dir.join(spec.filename);
+                let status = if target_path.exists() {
+                    let sz = target_path.metadata().map_or(0, |m| m.len()) / (1024 * 1024);
+                    if sz >= spec.size_mb.saturating_sub(100) {
+                        format!("✓ Downloaded ({sz} MB)")
+                    } else {
+                        format!("⚠ Partial ({sz}/{} MB)", spec.size_mb)
+                    }
+                } else {
+                    "✗ Missing".to_string()
+                };
+
+                println!(
+                    "{:<22} {:<24} {:<10} {:<15}",
+                    spec.id,
+                    spec.kind,
+                    format!("~{} MB", spec.size_mb),
+                    status
+                );
+            }
+            Ok(())
+        }
+        ModelCommands::Download { model } => {
+            println!("=== CallMind Model Downloader (with Resume Support) ===");
+            let specs_to_download: Vec<&ModelSpec> = if model == "all" {
+                REGISTERED_MODELS.iter().collect()
+            } else {
+                REGISTERED_MODELS.iter().filter(|s| s.id == model).collect()
+            };
+
+            if specs_to_download.is_empty() {
+                bail!(
+                    "Model '{model}' not found in model registry. Run 'callmind models list' to view available models."
+                );
+            }
+
+            for spec in specs_to_download {
+                let target_path = models_dir.join(spec.filename);
+
+                if let Some(parent) = target_path.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+
+                println!("Processing model '{}' (~{} MB)...", spec.id, spec.size_mb);
+                download_file_resumable(spec.url, &target_path).await?;
+                println!("[✓] Model '{}' ready at {:?}", spec.id, target_path);
+            }
+
+            Ok(())
+        }
+        ModelCommands::Verify { model } => {
+            println!("=== CallMind Model Verification ===");
+            let specs_to_verify: Vec<&ModelSpec> = if model == "all" {
+                REGISTERED_MODELS.iter().collect()
+            } else {
+                REGISTERED_MODELS.iter().filter(|s| s.id == model).collect()
+            };
+
+            for spec in specs_to_verify {
+                let target_path = models_dir.join(spec.filename);
+                if !target_path.exists() {
+                    println!("[✗] Model '{}' is MISSING at {:?}", spec.id, target_path);
+                    continue;
+                }
+
+                let mut file = File::open(&target_path)?;
+                let mut hasher = Sha256::new();
+                std::io::copy(&mut file, &mut hasher)?;
+                let hash = hex::encode(hasher.finalize());
+
+                if spec.sha256.is_empty() {
+                    println!(
+                        "[✓] Model '{}' present (Calculated SHA256: {})",
+                        spec.id, hash
+                    );
+                } else if hash == spec.sha256 {
+                    println!(
+                        "[✓] Model '{}' checksum MATCHED (SHA256: {})",
+                        spec.id, hash
+                    );
+                } else {
+                    println!(
+                        "[✗] Model '{}' checksum MISMATCH!\n    Expected: {}\n    Got:      {}",
+                        spec.id, spec.sha256, hash
+                    );
+                }
+            }
+
+            Ok(())
+        }
+    }
+}
+
+/// Downloads a file with HTTP Range resume support and live terminal progress.
+async fn download_file_resumable(url: &str, dest_path: &Path) -> Result<()> {
+    let client = reqwest::Client::new();
+
+    // Check if partial download exists
+    let initial_offset = if dest_path.exists() {
+        std::fs::metadata(dest_path)?.len()
+    } else {
+        0
+    };
+
+    let mut req = client.get(url);
+    if initial_offset > 0 {
+        println!(
+            "  -> Found partial download of {} MB. Requesting resume...",
+            initial_offset / (1024 * 1024)
+        );
+        req = req.header(reqwest::header::RANGE, format!("bytes={initial_offset}-"));
+    }
+
+    let response = req
+        .send()
+        .await
+        .context(format!("Failed to initiate download from {url}"))?;
+
+    let status = response.status();
+
+    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        println!("  -> Download is already complete.");
+        return Ok(());
+    }
+
+    let is_resuming = status == reqwest::StatusCode::PARTIAL_CONTENT;
+
+    if !status.is_success() {
+        bail!("Download failed with HTTP status: {status}");
+    }
+
+    let total_len = if is_resuming {
+        response.content_length().map(|len| len + initial_offset)
+    } else {
+        response.content_length()
+    };
+
+    if !is_resuming && initial_offset > 0 {
+        if let Some(total) = total_len {
+            if total == initial_offset {
+                println!(
+                    "  -> Model file is already completely downloaded ({} MB).",
+                    total / (1024 * 1024)
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(is_resuming)
+        .truncate(!is_resuming)
+        .open(dest_path)
+        .context(format!("Failed to open destination file at {dest_path:?}"))?;
+
+    let mut stream = response.bytes_stream();
+    let mut downloaded = if is_resuming { initial_offset } else { 0 };
+    let mut last_log_time = std::time::Instant::now();
+    let start_time = std::time::Instant::now();
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.context("Error while streaming download")?;
+        file.write_all(&chunk)?;
+        downloaded += chunk.len() as u64;
+
+        if last_log_time.elapsed().as_millis() >= 1000 {
+            let total_mb_str =
+                total_len.map_or("?".to_string(), |t| format!("{} MB", t / (1024 * 1024)));
+            let pct_str = total_len.map_or(String::new(), |t| {
+                if t > 0 {
+                    format!(" ({:.1}%)", (downloaded as f64 / t as f64) * 100.0)
+                } else {
+                    String::new()
+                }
+            });
+
+            let elapsed_secs = start_time.elapsed().as_secs_f64().max(0.001);
+            let bytes_since_start =
+                downloaded.saturating_sub(if is_resuming { initial_offset } else { 0 });
+            let speed_mb_s = (bytes_since_start as f64 / (1024.0 * 1024.0)) / elapsed_secs;
+
+            print!(
+                "\r  -> Progress: {} MB / {}{}, speed: {:.2} MB/s...      ",
+                downloaded / (1024 * 1024),
+                total_mb_str,
+                pct_str,
+                speed_mb_s
+            );
+            let _ = std::io::stdout().flush();
+            last_log_time = std::time::Instant::now();
+        }
+    }
+
+    file.flush()?;
+    println!(
+        "\r  -> Progress: 100% completed ({} MB).                              ",
+        downloaded / (1024 * 1024)
+    );
+    Ok(())
+}

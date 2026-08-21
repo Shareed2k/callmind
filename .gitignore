@@ -1,0 +1,26 @@
+# Build artifacts
+/target
+Cargo.lock
+
+# Data & local databases
+/data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.log
+
+# AI Model weights (downloaded via CLI)
+/models
+*.bin
+*.gguf
+*.onnx
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

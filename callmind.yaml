@@ -1,0 +1,45 @@
+# CallMind Server Configuration Template (YAML)
+
+server:
+  bind: "127.0.0.1:8080"
+  body_limit_mb: 500
+
+database:
+  driver: "sqlite"
+  url: "./data/callmind.db"
+  max_connections: 16
+  busy_timeout_ms: 5000
+
+storage:
+  driver: "filesystem"
+  path: "./data/recordings"
+
+jobs:
+  workers: 4
+  poll_interval_ms: 500
+  lock_timeout_secs: 600
+  max_attempts: 3
+
+models:
+  # Base directory for AI models:
+  # - STT: ./models/stt/ivrit-ai-large-v3-turbo.bin, ./models/stt/whisper-large-v3.bin
+  # - Diarization ONNX: ./models/diarization/speaker_embedding.onnx (PyAnnote, ECAPA-TDNN, or WeSpeaker)
+  models_dir: "./models"
+
+llm:
+  provider: "ollama" # "ollama", "openai", "anthropic", "heuristic"
+  endpoint: "http://localhost:11434"
+  # Recommended models:
+  # - Hebrew specialized: "dicta-il/DictaLM-3.0-1.7B-Instruct", "yonioz123/Llama-3.2-3B-Hebrew-Master"
+  # - General multilingual: "llama3.2:3b", "qwen2.5:7b", "gpt-4o-mini", "claude-3-5-sonnet-20241022"
+  model: "llama3.2:3b"
+  api_key: null
+
+auth:
+  enabled: false
+  api_key: null # e.g. "secret-api-key-here" or set CALLMIND_AUTH_API_KEY
+
+watcher:
+  enabled: false
+  watch_dir: "./incoming"
+  poll_secs: 5

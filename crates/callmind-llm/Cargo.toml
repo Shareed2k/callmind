@@ -1,0 +1,21 @@
+[package]
+name = "callmind-llm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+callmind-core.workspace = true
+callmind-config.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+utoipa.workspace = true
+tokio.workspace = true
+reqwest.workspace = true

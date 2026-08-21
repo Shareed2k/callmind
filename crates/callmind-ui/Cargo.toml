@@ -1,0 +1,22 @@
+[package]
+name = "callmind-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+callmind-core.workspace = true
+callmind-transcript.workspace = true
+callmind-analysis.workspace = true
+callmind-search.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+html-escape.workspace = true

@@ -1,0 +1,35 @@
+[package]
+name = "callmind-jobs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+callmind-core.workspace = true
+callmind-config.workspace = true
+callmind-db.workspace = true
+callmind-storage.workspace = true
+callmind-audio.workspace = true
+callmind-vad.workspace = true
+callmind-language.workspace = true
+callmind-stt.workspace = true
+callmind-diarization.workspace = true
+callmind-transcript.workspace = true
+callmind-analysis.workspace = true
+callmind-search.workspace = true
+callmind-llm.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tempfile.workspace = true

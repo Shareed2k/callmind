@@ -1,0 +1,24 @@
+[package]
+name = "callmind-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+callmind-core.workspace = true
+callmind-config.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+tempfile.workspace = true

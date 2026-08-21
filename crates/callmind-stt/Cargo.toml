@@ -1,0 +1,27 @@
+[package]
+name = "callmind-stt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["metal"]
+metal = ["whisper-rs/metal"]
+cpu = []
+
+[dependencies]
+callmind-core.workspace = true
+callmind-audio.workspace = true
+callmind-language.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+utoipa.workspace = true
+tokio.workspace = true
+whisper-rs.workspace = true

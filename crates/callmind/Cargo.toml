@@ -1,0 +1,49 @@
+[package]
+name = "callmind"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["callmind-stt/metal"]
+metal = ["callmind-stt/metal"]
+cpu = ["callmind-stt/cpu"]
+
+[dependencies]
+callmind-core.workspace = true
+callmind-config.workspace = true
+callmind-db.workspace = true
+callmind-storage.workspace = true
+callmind-audio.workspace = true
+callmind-vad.workspace = true
+callmind-language.workspace = true
+callmind-stt.workspace = true
+callmind-diarization.workspace = true
+callmind-transcript.workspace = true
+callmind-jobs.workspace = true
+callmind-llm.workspace = true
+callmind-analysis.workspace = true
+callmind-search.workspace = true
+callmind-api.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+axum.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+sha2.workspace = true
+hex.workspace = true

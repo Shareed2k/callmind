@@ -1,0 +1,22 @@
+[package]
+name = "callmind-diarization"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+callmind-core.workspace = true
+callmind-audio.workspace = true
+callmind-vad.workspace = true
+callmind-stt.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+serde.workspace = true
+utoipa.workspace = true
+tokio.workspace = true
+tract-onnx = "0.23.5"

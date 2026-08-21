@@ -1,0 +1,43 @@
+[package]
+name = "callmind-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+callmind-core.workspace = true
+callmind-config.workspace = true
+callmind-audio.workspace = true
+callmind-db.workspace = true
+callmind-storage.workspace = true
+callmind-jobs.workspace = true
+callmind-transcript.workspace = true
+callmind-analysis.workspace = true
+callmind-search.workspace = true
+callmind-ui.workspace = true
+callmind-llm.workspace = true
+sqlx.workspace = true
+
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+utoipa.workspace = true
+utoipa-swagger-ui.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+http = "1.2"
+http-body-util = "0.1"
+tempfile.workspace = true
+reqwest.workspace = true
