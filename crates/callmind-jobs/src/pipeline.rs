@@ -86,9 +86,21 @@ impl JobHandler for CallPipelineHandler {
             .and_then(|v| v.as_str())
             .and_then(|l| l.parse().ok());
 
+        let channel_mapping: Option<callmind_core::ChannelMapping> = ctx
+            .job
+            .payload
+            .get("channel_mapping")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
         let transcript = self
             .transcriber
-            .transcribe_conversation(call_id, &decoded_audio, explicit_lang, &[])
+            .transcribe_conversation(
+                call_id,
+                &decoded_audio,
+                explicit_lang,
+                channel_mapping.as_ref(),
+                &[],
+            )
             .await
             .map_err(|e| {
                 JobExecutionError::Retryable(format!("Audio transcription failed: {e}"))

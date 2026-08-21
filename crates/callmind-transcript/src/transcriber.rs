@@ -68,6 +68,7 @@ impl AudioTranscriber {
         call_id: CallId,
         decoded_audio: &AudioBuffer,
         explicit_language_hint: Option<Language>,
+        channel_mapping: Option<&callmind_core::ChannelMapping>,
         vocabulary: &[crate::vocabulary::VocabularyEntry],
     ) -> Result<Transcript, TranscriberError> {
         // 1. Channel Analysis & Resampling
@@ -139,10 +140,11 @@ impl AudioTranscriber {
         let aligned_words = TranscriptAligner::align(&stt_res.words, &diarization_res.turns);
 
         // 6. Build Structured Transcript with Roles, Normalization & RTL/LTR
-        let transcript = TranscriptBuilder::build(
+        let transcript = TranscriptBuilder::build_with_mapping(
             call_id,
             &aligned_words,
             &channel_mode,
+            channel_mapping,
             vocabulary,
             language_detection.distribution,
         );

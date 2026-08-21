@@ -51,6 +51,13 @@ impl Call {
     }
 }
 
+/// Explicit stereo channel to role mapping from PBX or telephony infrastructure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChannelMapping {
+    pub left: crate::enums::SpeakerRole,
+    pub right: crate::enums::SpeakerRole,
+}
+
 /// Request DTO for creating a new Call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateCallRequest {
@@ -65,6 +72,7 @@ pub struct CreateCallRequest {
     #[schema(example = "+97235551234")]
     pub phone_to: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
+    pub channel_mapping: Option<ChannelMapping>,
 }
 
 /// Query filter for listing calls.

@@ -1,20 +1,28 @@
 use crate::models::TranscriptSegment;
 use callmind_audio::ChannelMode;
-use callmind_core::{SpeakerId, SpeakerRole};
+use callmind_core::{ChannelMapping, SpeakerId, SpeakerRole};
 use std::collections::HashMap;
 
 /// Identifies conversational roles (Agent, Customer, Supervisor) from audio metadata & speech patterns.
 pub struct RoleIdentifier;
 
 impl RoleIdentifier {
-    /// Infer speaker roles across transcript segments.
+    /// Infer speaker roles across transcript segments, respecting explicit PBX channel mappings.
     pub fn identify_roles(
         segments: &[TranscriptSegment],
         channel_mode: &ChannelMode,
+        channel_mapping: Option<&ChannelMapping>,
     ) -> HashMap<SpeakerId, SpeakerRole> {
         let mut roles = HashMap::new();
 
-        // 1. Channel-based identification for Stereo with acoustic greeting check
+        // 1. Explicit PBX Channel Mapping takes precedence
+        if let Some(mapping) = channel_mapping {
+            roles.insert(SpeakerId::new(0), mapping.left);
+            roles.insert(SpeakerId::new(1), mapping.right);
+            return roles;
+        }
+
+        // 2. Channel-based identification for Stereo with acoustic greeting check
         if let ChannelMode::StereoSeparated {
             left_channel,
             right_channel,
@@ -41,7 +49,7 @@ impl RoleIdentifier {
             return roles;
         }
 
-        // 2. Phrase-based heuristic identification for Mono audio
+        // 3. Phrase-based heuristic identification for Mono audio
         let mut agent_speaker: Option<SpeakerId> = None;
 
         for segment in segments.iter().take(4) {
@@ -130,8 +138,19 @@ mod tests {
             words: Vec::new(),
         };
 
-        let roles = RoleIdentifier::identify_roles(&[seg1, seg2], &ChannelMode::Mono);
+        let roles = RoleIdentifier::identify_roles(&[seg1, seg2], &ChannelMode::Mono, None);
         assert_eq!(roles.get(&SpeakerId::new(1)), Some(&SpeakerRole::Agent));
         assert_eq!(roles.get(&SpeakerId::new(0)), Some(&SpeakerRole::Customer));
+    }
+
+    #[test]
+    fn test_role_identification_with_explicit_pbx_mapping() {
+        let mapping = ChannelMapping {
+            left: SpeakerRole::Customer,
+            right: SpeakerRole::Agent,
+        };
+        let roles = RoleIdentifier::identify_roles(&[], &ChannelMode::Mono, Some(&mapping));
+        assert_eq!(roles.get(&SpeakerId::new(0)), Some(&SpeakerRole::Customer));
+        assert_eq!(roles.get(&SpeakerId::new(1)), Some(&SpeakerRole::Agent));
     }
 }

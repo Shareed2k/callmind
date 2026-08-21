@@ -22,6 +22,18 @@ impl TranscriptBuilder {
         vocabulary: &[VocabularyEntry],
         languages: Vec<LanguageProbability>,
     ) -> Transcript {
+        Self::build_with_mapping(call_id, words, channel_mode, None, vocabulary, languages)
+    }
+
+    /// Build a complete `Transcript` with optional explicit PBX channel mapping.
+    pub fn build_with_mapping(
+        call_id: CallId,
+        words: &[SttWord],
+        channel_mode: &ChannelMode,
+        channel_mapping: Option<&callmind_core::ChannelMapping>,
+        vocabulary: &[VocabularyEntry],
+        languages: Vec<LanguageProbability>,
+    ) -> Transcript {
         if words.is_empty() {
             return Transcript {
                 call_id,
@@ -111,8 +123,8 @@ impl TranscriptBuilder {
             });
         }
 
-        // 3. Infer speaker roles
-        let role_map = RoleIdentifier::identify_roles(&segments, channel_mode);
+        // 3. Infer speaker roles (respecting explicit channel mapping)
+        let role_map = RoleIdentifier::identify_roles(&segments, channel_mode, channel_mapping);
 
         for segment in &mut segments {
             if let Some(&role) = role_map.get(&segment.speaker_id) {
