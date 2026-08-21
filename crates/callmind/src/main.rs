@@ -159,18 +159,22 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
 
     // Production acoustic LID backed by Whisper multi-model probe
     let multi_stt_for_lid = multi_stt.clone();
-    let language_engine = Arc::new(callmind_language::SamplingLanguageEngine::new().with_detector(
-        move |buf| match multi_stt_for_lid.detect_language_probe(buf) {
-            Ok(probs) => probs
-                .into_iter()
-                .map(|(language, probability)| callmind_language::LanguageProbability {
-                    language,
-                    probability,
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        },
-    ));
+    let language_engine = Arc::new(
+        callmind_language::SamplingLanguageEngine::new().with_detector(move |buf| {
+            match multi_stt_for_lid.detect_language_probe(buf) {
+                Ok(probs) => probs
+                    .into_iter()
+                    .map(
+                        |(language, probability)| callmind_language::LanguageProbability {
+                            language,
+                            probability,
+                        },
+                    )
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        }),
+    );
 
     let stereo_diarizer = Arc::new(callmind_diarization::StereoChannelDiarizer::new(
         vad.clone(),

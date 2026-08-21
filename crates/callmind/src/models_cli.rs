@@ -81,7 +81,7 @@ pub const REGISTERED_MODELS: &[ModelSpec] = &[
         filename: "diarization/speaker_embedding.onnx",
         url: "https://huggingface.co/wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx",
         size_mb: 26,
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+        sha256: "7bb2f06e9df17cdf1ef14ee8a15ab08ed28e8d0ef5054ee135741560df2ec068",
     },
 ];
 
@@ -156,10 +156,13 @@ pub async fn run_models_command(models_dir: &Path, cmd: ModelCommands) -> Result
                 REGISTERED_MODELS.iter().filter(|s| s.id == model).collect()
             };
 
+            let mut failed_checks = 0;
+
             for spec in specs_to_verify {
                 let target_path = models_dir.join(spec.filename);
                 if !target_path.exists() {
                     println!("[✗] Model '{}' is MISSING at {:?}", spec.id, target_path);
+                    failed_checks += 1;
                     continue;
                 }
 
@@ -183,7 +186,12 @@ pub async fn run_models_command(models_dir: &Path, cmd: ModelCommands) -> Result
                         "[✗] Model '{}' checksum MISMATCH!\n    Expected: {}\n    Got:      {}",
                         spec.id, spec.sha256, hash
                     );
+                    failed_checks += 1;
                 }
+            }
+
+            if failed_checks > 0 {
+                bail!("{failed_checks} model verification check(s) failed.");
             }
 
             Ok(())
