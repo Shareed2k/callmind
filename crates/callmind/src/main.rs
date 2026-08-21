@@ -134,7 +134,6 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
 
     // Initialize AI and Processing Subsystems
     let vad = Arc::new(callmind_vad::EnergyVadEngine::default());
-    let language_engine = Arc::new(callmind_language::SamplingLanguageEngine::default());
 
     let hebrew_model_path = config
         .models
@@ -152,7 +151,26 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         "whisper-large-v3",
         "1.0",
     ));
-    let stt_router = Arc::new(callmind_stt::SttRouter::new(hebrew_stt, multi_stt, 0.90));
+    let stt_router = Arc::new(callmind_stt::SttRouter::new(
+        hebrew_stt,
+        multi_stt.clone(),
+        0.90,
+    ));
+
+    // Production acoustic LID backed by Whisper multi-model probe
+    let multi_stt_for_lid = multi_stt.clone();
+    let language_engine = Arc::new(callmind_language::SamplingLanguageEngine::new().with_detector(
+        move |buf| match multi_stt_for_lid.detect_language_probe(buf) {
+            Ok(probs) => probs
+                .into_iter()
+                .map(|(language, probability)| callmind_language::LanguageProbability {
+                    language,
+                    probability,
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        },
+    ));
 
     let stereo_diarizer = Arc::new(callmind_diarization::StereoChannelDiarizer::new(
         vad.clone(),

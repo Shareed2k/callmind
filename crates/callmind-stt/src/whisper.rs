@@ -75,6 +75,43 @@ impl WhisperCppEngine {
         *lock = Some(arc_ctx.clone());
         Ok(arc_ctx)
     }
+
+    /// Fast acoustic language identification probe using Whisper decoder state.
+    pub fn detect_language_probe(
+        &self,
+        audio: &callmind_audio::AudioBuffer,
+    ) -> Result<Vec<(Language, f32)>, SttError> {
+        let ctx = self.get_or_load_context()?;
+        let mono = audio.to_mono();
+        if mono.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sample_len = (15 * mono.sample_rate as usize).min(mono.samples.len());
+        let samples = mono.samples[..sample_len].to_vec();
+
+        let mut state = ctx
+            .create_state()
+            .map_err(|e| SttError::Inference(e.to_string()))?;
+
+        let mut params =
+            whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
+        params.set_translate(false);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_single_segment(true);
+        params.set_max_len(1);
+
+        state
+            .full(params, &samples)
+            .map_err(|e| SttError::Inference(e.to_string()))?;
+
+        let lang_id = state.full_lang_id_from_state();
+        let detected_lang_str = whisper_rs::get_lang_str(lang_id).unwrap_or("en");
+        let lang: Language = detected_lang_str.parse().unwrap_or(Language::English);
+        Ok(vec![(lang, 0.95)])
+    }
 }
 
 #[async_trait]
