@@ -76,6 +76,7 @@ async fn test_call_lifecycle_and_recording_upload_stream() {
         phone_from: Some("+972501112233".to_string()),
         phone_to: Some("+97235559988".to_string()),
         started_at: None,
+        channel_mapping: None,
     };
     let req_body = serde_json::to_vec(&create_req).unwrap();
 
