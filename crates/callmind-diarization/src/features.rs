@@ -123,6 +123,44 @@ impl AcousticFeatureExtractor {
         embedding
     }
 
+    /// Compute 80-channel log Mel filterbank energy frames from 16kHz audio.
+    #[must_use]
+    pub fn compute_fbank_80(samples: &[f32], sample_rate: u32) -> Vec<Vec<f32>> {
+        if samples.len() < FRAME_SIZE {
+            return Vec::new();
+        }
+
+        let mel_filters = build_mel_filterbank(sample_rate, FRAME_SIZE, 80);
+        let mut frames = Vec::new();
+        let mut start = 0;
+
+        while start + FRAME_SIZE <= samples.len() {
+            let frame = &samples[start..start + FRAME_SIZE];
+            let mut windowed = Vec::with_capacity(FRAME_SIZE);
+            for (i, &s) in frame.iter().enumerate() {
+                let w = 0.54 - 0.46 * (2.0 * PI * i as f32 / (FRAME_SIZE as f32 - 1.0)).cos();
+                windowed.push(s * w);
+            }
+
+            let spectrum = compute_power_spectrum(&windowed);
+            let mut mel_energies = Vec::with_capacity(80);
+            for filter in &mel_filters {
+                let mut energy = 0.0f32;
+                for (bin_idx, &weight) in filter.iter().enumerate() {
+                    if bin_idx < spectrum.len() {
+                        energy += spectrum[bin_idx] * weight;
+                    }
+                }
+                mel_energies.push((energy.max(1e-6)).ln());
+            }
+
+            frames.push(mel_energies);
+            start += FRAME_STEP;
+        }
+
+        frames
+    }
+
     /// Calculate cosine distance between two embedding vectors (0.0 = identical, 1.0 = orthogonal, 2.0 = opposite).
     #[must_use]
     pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {

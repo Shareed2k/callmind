@@ -53,18 +53,41 @@ impl OnnxSpeakerEmbeddingExtractor {
             return Err(DiarizationError::EmptyAudio);
         }
 
-        // Standard 2D shape [1, samples]
-        let input_tensor: Tensor =
+        // 1. Try standard raw waveform [1, samples]
+        let wave_tensor: Tensor =
             tract_ndarray::Array2::from_shape_vec((1, samples.len()), samples.to_vec())
                 .map_err(|e| {
                     DiarizationError::Inference(format!("Failed to create input tensor shape: {e}"))
                 })?
                 .into();
 
-        let output = self
-            .plan
-            .run(tvec!(input_tensor.into()))
-            .map_err(|e| DiarizationError::Inference(format!("ONNX inference error: {e}")))?;
+        let output = match self.plan.run(tvec!(wave_tensor.into())) {
+            Ok(out) => out,
+            Err(_) => {
+                // 2. Try 80-dim log Mel filterbank frames [1, frames, 80] for models requiring FBank features
+                let fbank =
+                    crate::features::AcousticFeatureExtractor::compute_fbank_80(samples, 16000);
+                if fbank.is_empty() {
+                    return Err(DiarizationError::Inference(
+                        "Audio sample too short for FBank features".into(),
+                    ));
+                }
+                let num_frames = fbank.len();
+                let flat_fbank: Vec<f32> = fbank.into_iter().flatten().collect();
+                let fbank_tensor: Tensor =
+                    tract_ndarray::Array3::from_shape_vec((1, num_frames, 80), flat_fbank)
+                        .map_err(|e| {
+                            DiarizationError::Inference(format!(
+                                "Failed to create FBank 3D tensor: {e}"
+                            ))
+                        })?
+                        .into();
+
+                self.plan.run(tvec!(fbank_tensor.into())).map_err(|e| {
+                    DiarizationError::Inference(format!("ONNX inference error: {e}"))
+                })?
+            }
+        };
 
         if output.is_empty() {
             return Err(DiarizationError::Inference(
