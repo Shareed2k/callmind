@@ -16,16 +16,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libclang-dev \
     libvulkan-dev \
     glslang-tools \
+    libshaderc-dev \
     libssl-dev \
-    wget \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Ensure glslc compiler binary is available for Vulkan shader compilation
 RUN if ! command -v glslc >/dev/null 2>&1; then \
-        wget -q https://storage.googleapis.com/shaderc/artifacts/prod/build_glslc_linux_gcc_release/latest/install.tgz -O /tmp/install.tgz && \
-        tar -xzf /tmp/install.tgz -C /usr/local/ && \
-        rm -f /tmp/install.tgz; \
+        printf '#!/bin/sh\nexec glslangValidator -V "$@"\n' > /usr/local/bin/glslc && \
+        chmod +x /usr/local/bin/glslc; \
     fi
 
 # Copy workspace sources
