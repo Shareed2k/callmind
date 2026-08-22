@@ -1,7 +1,7 @@
 # ------------------------------------------------------------------------------
 # Stage 1: Nvidia CUDA Builder
 # ------------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-devel-bookworm AS builder
+FROM nvidia/cuda:12.6.3-devel-bookworm AS builder
 
 WORKDIR /usr/src/callmind
 
@@ -30,7 +30,7 @@ RUN echo "Building CallMind with Nvidia CUDA acceleration..." && \
 # ------------------------------------------------------------------------------
 # Stage 2: Nvidia CUDA Runtime
 # ------------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-runtime-bookworm AS runtime
+FROM nvidia/cuda:12.6.3-runtime-bookworm AS runtime
 
 WORKDIR /app
 
