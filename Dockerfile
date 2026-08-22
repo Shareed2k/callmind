@@ -1,7 +1,7 @@
 # ------------------------------------------------------------------------------
 # Stage 1: Builder
 # ------------------------------------------------------------------------------
-FROM rust:1.85-bookworm AS builder
+FROM rust:bookworm AS builder
 
 # Build argument for hardware acceleration: "cpu" or "vulkan"
 ARG ACCELERATION=cpu
