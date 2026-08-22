@@ -39,7 +39,7 @@ jobs:
             flags: "--no-default-features --features vulkan"
             binary_name: callmind
             archive_name: callmind-${{ github.ref_name }}-linux-x86_64-vulkan.tar.gz
-            apt_packages: "cmake pkg-config libasound2-dev libclang-dev libvulkan-dev glslang-tools glslc libssl-dev"
+            apt_packages: "libvulkan-dev glslc libssl-dev"
 
     steps:
       - name: Checkout repository

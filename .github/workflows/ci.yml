@@ -69,3 +69,25 @@ jobs:
 
       - name: Run workspace tests (CPU)
         run: cargo test --workspace --no-default-features --features cpu
+
+  check-vulkan:
+    name: Check Linux (Vulkan Backend)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies & Vulkan SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libasound2-dev libclang-dev libvulkan-dev glslc
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check workspace (Vulkan)
+        run: cargo check --workspace --no-default-features --features vulkan

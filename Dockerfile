@@ -1,31 +1,33 @@
 # ------------------------------------------------------------------------------
 # Stage 1: Builder
 # ------------------------------------------------------------------------------
-FROM rust:bookworm AS builder
+FROM ubuntu:24.04 AS builder
 
+ARG DEBIAN_FRONTEND=noninteractive
 # Build argument for hardware acceleration: "cpu" or "vulkan"
 ARG ACCELERATION=cpu
 
 WORKDIR /usr/src/callmind
 
-# Install build dependencies & Vulkan SDK headers
+# Install build dependencies, Vulkan SDK headers & glslc shader compiler
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
     cmake \
     pkg-config \
+    build-essential \
     libasound2-dev \
     libclang-dev \
-    libvulkan-dev \
-    glslang-tools \
-    libshaderc-dev \
     libssl-dev \
-    ca-certificates \
+    libvulkan-dev \
+    glslc \
     && rm -rf /var/lib/apt/lists/*
 
-# Ensure glslc compiler compatibility wrapper is available for Vulkan shader compilation
-RUN if ! command -v glslc >/dev/null 2>&1; then \
-        printf '#!/bin/sh\nSTAGE="comp"\nOUT=""\nIN=""\nwhile [ $# -gt 0 ]; do\n  case "$1" in\n    -fshader-stage=*)\n      STAGE="${1#-fshader-stage=}"\n      shift ;;\n    -o)\n      OUT="$2"\n      shift 2 ;;\n    -*)\n      shift ;;\n    *)\n      IN="$1"\n      shift ;;\n  esac\ndone\nexec glslangValidator -V -S "$STAGE" "$IN" -o "$OUT"\n' > /usr/local/bin/glslc && \
-        chmod +x /usr/local/bin/glslc; \
-    fi
+# Install Rust toolchain
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain stable
 
 # Copy workspace sources
 COPY Cargo.toml Cargo.lock ./
@@ -43,15 +45,16 @@ RUN if [ "$ACCELERATION" = "vulkan" ]; then \
 # ------------------------------------------------------------------------------
 # Stage 2: Minimal Runtime
 # ------------------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM ubuntu:24.04 AS runtime
 
+ARG DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
 # Install runtime dependencies, CA certificates, and Vulkan drivers
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    libasound2 \
+    libasound2t64 \
     libvulkan1 \
     mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*

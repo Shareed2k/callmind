@@ -3,6 +3,8 @@
 # ------------------------------------------------------------------------------
 FROM nvidia/cuda:12.6.3-devel-ubuntu22.04 AS builder
 
+ARG DEBIAN_FRONTEND=noninteractive
+
 WORKDIR /usr/src/callmind
 
 # Install build dependencies, curl, and clang
@@ -27,6 +29,10 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
+# Target modern NVIDIA GPU architectures: Turing (75), Ampere (80, 86), Ada Lovelace (89), Hopper (90)
+ENV CUDAARCHS="75;80;86;89;90" \
+    CMAKE_CUDA_ARCHITECTURES="75;80;86;89;90"
+
 # Build release binary with Nvidia CUDA acceleration
 RUN echo "Building CallMind with Nvidia CUDA acceleration..." && \
     cargo build --release --no-default-features --features cuda
@@ -35,6 +41,8 @@ RUN echo "Building CallMind with Nvidia CUDA acceleration..." && \
 # Stage 2: Nvidia CUDA Runtime
 # ------------------------------------------------------------------------------
 FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04 AS runtime
+
+ARG DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
 
