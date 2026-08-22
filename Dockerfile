@@ -21,9 +21,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Ensure glslc compiler binary is available for Vulkan shader compilation
+# Ensure glslc compiler compatibility wrapper is available for Vulkan shader compilation
 RUN if ! command -v glslc >/dev/null 2>&1; then \
-        printf '#!/bin/sh\nexec glslangValidator -V "$@"\n' > /usr/local/bin/glslc && \
+        printf '#!/bin/sh\nSTAGE="comp"\nOUT=""\nIN=""\nwhile [ $# -gt 0 ]; do\n  case "$1" in\n    -fshader-stage=*)\n      STAGE="${1#-fshader-stage=}"\n      shift ;;\n    -o)\n      OUT="$2"\n      shift 2 ;;\n    -*)\n      shift ;;\n    *)\n      IN="$1"\n      shift ;;\n  esac\ndone\nexec glslangValidator -V -S "$STAGE" "$IN" -o "$OUT"\n' > /usr/local/bin/glslc && \
         chmod +x /usr/local/bin/glslc; \
     fi
 
