@@ -1,8 +1,13 @@
 services:
+  # ----------------------------------------------------------------------------
+  # 1. CallMind (Default Universal CPU)
+  # ----------------------------------------------------------------------------
   callmind:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        ACCELERATION: cpu
     container_name: callmind-server
     restart: unless-stopped
     ports:
@@ -22,6 +27,78 @@ services:
     networks:
       - callmind-net
 
+  # ----------------------------------------------------------------------------
+  # 2. CallMind (Vulkan GPU - AMD Radeon, Intel Arc, Nvidia)
+  # Run via: docker compose --profile vulkan up -d
+  # ----------------------------------------------------------------------------
+  callmind-vulkan:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ACCELERATION: vulkan
+    container_name: callmind-vulkan-server
+    profiles: ["vulkan"]
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    devices:
+      - /dev/dri:/dev/dri # Pass Direct Rendering Infrastructure to container
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./callmind.yaml:/app/callmind.yaml:ro
+    environment:
+      - RUST_LOG=info
+      - CALLMIND_SERVER_BIND=0.0.0.0:8080
+      - CALLMIND_LLM_ENDPOINT=http://ollama:11434
+      - CALLMIND_LLM_PROVIDER=ollama
+      - CALLMIND_LLM_MODEL=llama3.2:3b
+    depends_on:
+      - ollama
+    networks:
+      - callmind-net
+
+  # ----------------------------------------------------------------------------
+  # 3. CallMind (Nvidia CUDA GPU)
+  # Run via: docker compose --profile cuda up -d
+  # ----------------------------------------------------------------------------
+  callmind-cuda:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    container_name: callmind-cuda-server
+    profiles: ["cuda"]
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./callmind.yaml:/app/callmind.yaml:ro
+    environment:
+      - RUST_LOG=info
+      - CALLMIND_SERVER_BIND=0.0.0.0:8080
+      - CALLMIND_LLM_ENDPOINT=http://ollama:11434
+      - CALLMIND_LLM_PROVIDER=ollama
+      - CALLMIND_LLM_MODEL=llama3.2:3b
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      - ollama
+    networks:
+      - callmind-net
+
+  # ----------------------------------------------------------------------------
+  # Ollama LLM Server
+  # ----------------------------------------------------------------------------
   ollama:
     image: ollama/ollama:latest
     container_name: callmind-ollama
@@ -32,15 +109,6 @@ services:
       - ollama-models:/root/.ollama
     networks:
       - callmind-net
-
-    # Uncomment below to enable Nvidia GPU passthrough on Linux:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
 
 volumes:
   ollama-models:

@@ -176,13 +176,19 @@ curl -X POST "http://localhost:8080/api/v1/bots/webhook?sync=true" \
 
 ## 🐳 Docker & Docker Compose
 
-Run CallMind with Ollama in an isolated container environment:
+Run CallMind with hardware-accelerated speech processing and Ollama in containers:
 
 ```bash
-# Start CallMind + Ollama
+# 1. Universal CPU Mode (Default)
 docker compose up -d
 
-# Pull the default LLM in Ollama container
+# 2. Vulkan GPU Acceleration (AMD Radeon, Intel Arc, Nvidia on Linux)
+docker compose --profile vulkan up -d
+
+# 3. Nvidia CUDA GPU Acceleration (Nvidia RTX / Tesla with nvidia-container-toolkit)
+docker compose --profile cuda up -d
+
+# Pull the default LLM in the Ollama container
 docker compose exec ollama ollama pull llama3.2:3b
 
 # Download speech & diarization models inside CallMind

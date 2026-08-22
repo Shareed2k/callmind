@@ -1,50 +1,44 @@
 # ------------------------------------------------------------------------------
-# Stage 1: Builder
+# Stage 1: Nvidia CUDA Builder
 # ------------------------------------------------------------------------------
-FROM rust:1.85-bookworm AS builder
-
-# Build argument for hardware acceleration: "cpu" or "vulkan"
-ARG ACCELERATION=cpu
+FROM nvidia/cuda:12.4.1-devel-bookworm AS builder
 
 WORKDIR /usr/src/callmind
 
-# Install build dependencies & Vulkan SDK headers
+# Install build dependencies, curl, and clang
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
     cmake \
     pkg-config \
     libasound2-dev \
     libclang-dev \
-    libvulkan-dev \
-    glslang-tools \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.85.0
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Copy workspace sources
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
-# Build release binary based on selected acceleration target
-RUN if [ "$ACCELERATION" = "vulkan" ]; then \
-        echo "Building CallMind with Vulkan GPU acceleration..." && \
-        cargo build --release --no-default-features --features vulkan; \
-    else \
-        echo "Building CallMind with universal CPU backend..." && \
-        cargo build --release --no-default-features --features cpu; \
-    fi
+# Build release binary with Nvidia CUDA acceleration
+RUN echo "Building CallMind with Nvidia CUDA acceleration..." && \
+    cargo build --release --no-default-features --features cuda
 
 # ------------------------------------------------------------------------------
-# Stage 2: Minimal Runtime
+# Stage 2: Nvidia CUDA Runtime
 # ------------------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM nvidia/cuda:12.4.1-runtime-bookworm AS runtime
 
 WORKDIR /app
 
-# Install runtime dependencies, CA certificates, and Vulkan drivers
+# Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     libasound2 \
-    libvulkan1 \
-    mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy compiled binary from builder
@@ -63,7 +57,9 @@ EXPOSE 8080
 ENV RUST_LOG=info \
     CALLMIND_SERVER_BIND="0.0.0.0:8080" \
     CALLMIND_DATABASE_URL="/app/data/callmind.db" \
-    CALLMIND_STORAGE_PATH="/app/data/recordings"
+    CALLMIND_STORAGE_PATH="/app/data/recordings" \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
