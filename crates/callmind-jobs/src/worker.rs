@@ -210,9 +210,49 @@ impl WorkerPool {
                                             warn!(
                                                 "[{worker_id}] Job {job_id} was cancelled during execution"
                                             );
-                                            let _ = job_repo
-                                                .mark_failed(job_id, "Cancelled", None)
-                                                .await;
+                                            if let Some(ref p) = pool_opt {
+                                                let now = chrono::Utc::now().to_rfc3339();
+                                                if let Err(e) = sqlx::query(
+                                                    r#"
+                                                    UPDATE jobs
+                                                    SET status = 'pending',
+                                                        attempt = MAX(attempt - 1, 0),
+                                                        run_after = ?,
+                                                        locked_at = NULL,
+                                                        locked_by = NULL,
+                                                        last_error = 'Interrupted by server shutdown',
+                                                        completed_at = NULL
+                                                    WHERE id = ?
+                                                    "#,
+                                                )
+                                                .bind(&now)
+                                                .bind(job_id.to_string())
+                                                .execute(p)
+                                                .await
+                                                {
+                                                    error!(
+                                                        "[{worker_id}] Failed to requeue cancelled job {job_id}: {e}"
+                                                    );
+                                                }
+
+                                                if let Some(call_id) = job_call_id {
+                                                    let _ = sqlx::query(
+                                                        "UPDATE calls SET processing_status = 'pending', updated_at = ? WHERE id = ?",
+                                                    )
+                                                    .bind(&now)
+                                                    .bind(call_id.to_string())
+                                                    .execute(p)
+                                                    .await;
+                                                }
+                                            } else {
+                                                let _ = job_repo
+                                                    .mark_failed(
+                                                        job_id,
+                                                        "Interrupted by server shutdown",
+                                                        Some(Duration::ZERO),
+                                                    )
+                                                    .await;
+                                            }
                                         }
                                         Err(JobExecutionError::Failed(err))
                                         | Err(JobExecutionError::HandlerNotFound(err)) => {

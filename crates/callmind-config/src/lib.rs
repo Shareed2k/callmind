@@ -44,6 +44,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub auth: AuthConfig,
+
+    #[serde(default)]
+    pub bots: BotsConfig,
 }
 
 impl AppConfig {
@@ -100,6 +103,18 @@ impl AppConfig {
             if !val.trim().is_empty() {
                 self.auth.api_key = Some(val);
                 self.auth.enabled = true;
+            }
+        }
+        if let Ok(val) = std::env::var("CALLMIND_TELEGRAM_BOT_TOKEN") {
+            if !val.trim().is_empty() {
+                self.bots.telegram.bot_token = Some(val);
+                self.bots.telegram.enabled = true;
+            }
+        }
+        if let Ok(val) = std::env::var("CALLMIND_WHATSAPP_ACCESS_TOKEN") {
+            if !val.trim().is_empty() {
+                self.bots.whatsapp.access_token = Some(val);
+                self.bots.whatsapp.enabled = true;
             }
         }
     }
@@ -344,6 +359,73 @@ pub struct AuthConfig {
 
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotsConfig {
+    #[serde(default)]
+    pub telegram: TelegramBotConfig,
+
+    #[serde(default)]
+    pub whatsapp: WhatsAppBotConfig,
+
+    #[serde(default)]
+    pub slack: SlackBotConfig,
+
+    #[serde(default)]
+    pub webhook: WebhookBotConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TelegramBotConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub bot_token: Option<String>,
+
+    #[serde(default)]
+    pub allowed_chat_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WhatsAppBotConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub phone_number_id: Option<String>,
+
+    #[serde(default)]
+    pub access_token: Option<String>,
+
+    #[serde(default)]
+    pub verify_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SlackBotConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub bot_token: Option<String>,
+
+    #[serde(default)]
+    pub signing_secret: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebhookBotConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub secret_token: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

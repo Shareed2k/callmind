@@ -87,8 +87,14 @@ impl TranscriptBuilder {
                 .collect::<Vec<_>>()
                 .join(" ");
 
-            if language == Language::Unknown {
-                language = RtlDetector::detect_language(&raw_text);
+            let text_language = RtlDetector::detect_language(&raw_text);
+            if language == Language::Unknown
+                || matches!(
+                    text_language,
+                    Language::Hebrew | Language::Russian | Language::Arabic
+                )
+            {
+                language = text_language;
             }
 
             let normalized_text = TextNormalizer::normalize(&raw_text, vocabulary);

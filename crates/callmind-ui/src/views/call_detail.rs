@@ -128,15 +128,44 @@ pub fn render_call_detail(
                 html.push_str("</div></div>");
             }
 
-            // Action Items
+            // Action Items & Grocery / To-Do List
             if !a.action_items.is_empty() {
-                html.push_str(r#"<div style="margin-top: 1.5rem;"><h3 style="font-size: 0.9rem; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 0.5rem;">Action Items & Tasks</h3><ul style="padding-left: 1.2rem; font-size: 0.9rem;">"#);
+                let mut todo_raw = String::new();
+                for item in &a.action_items {
+                    let _ = writeln!(todo_raw, "- [ ] {}", item.text);
+                }
+                let escaped_todo_js = html_escape::encode_text(&todo_raw);
+                let encoded_whatsapp = urlencoding_simple(&format!("*To-Do List ({})*:\n{}", a.title, todo_raw));
+
+                let _ = write!(
+                    html,
+                    r#"
+                    <div style="margin-top: 1.5rem; background: rgba(0,0,0,0.15); border: 1px solid var(--border-color); border-radius: 0.5rem; padding: 1rem;">
+                      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 0.75rem; flex-wrap:wrap; gap:0.5rem;">
+                        <h3 style="font-size: 0.9rem; color: var(--text-secondary); text-transform: uppercase; margin:0;">📝 Smart To-Do & Grocery List</h3>
+                        <div style="display:flex; gap:0.35rem;">
+                          <button onclick="navigator.clipboard.writeText('{escaped_todo_js}'); showToast('📋 Tasks copied to clipboard!');" style="background:rgba(255,255,255,0.08); border:1px solid var(--border-color); color:white; padding:0.25rem 0.6rem; border-radius:0.25rem; font-size:0.75rem; cursor:pointer;" title="Copy as Markdown / Apple Reminders">📋 Copy Tasks</button>
+                          <a href="https://api.whatsapp.com/send?text={encoded_whatsapp}" target="_blank" style="background:rgba(37,211,102,0.15); border:1px solid rgba(37,211,102,0.3); color:#86efac; padding:0.25rem 0.6rem; border-radius:0.25rem; font-size:0.75rem; text-decoration:none; font-weight:600; display:inline-flex; align-items:center; gap:0.25rem;">💬 WhatsApp</a>
+                        </div>
+                      </div>
+                      <div style="display:flex; flex-direction:column; gap:0.4rem;">
+                    "#
+                );
+
                 for item in &a.action_items {
                     let escaped_item = html_escape::encode_text(&item.text);
-                    let owner_str = item.owner.map_or_else(String::new, |o| format!(" [{}]", o.display_label(None)));
-                    let _ = write!(html, "<li><strong>{escaped_item}</strong>{owner_str}</li>");
+                    let owner_str = item.owner.map_or_else(String::new, |o| format!(" <span style='font-size:0.75rem; color:var(--text-muted); background:rgba(255,255,255,0.05); padding:0.1rem 0.4rem; border-radius:0.2rem;'>[{}]</span>", o.display_label(None)));
+                    let deadline_str = item.deadline.as_deref().map_or_else(String::new, |d| format!(" <span style='font-size:0.75rem; color:#fbbf24;'>⏰ {}</span>", html_escape::encode_text(d)));
+
+                    let _ = write!(
+                        html,
+                        r#"<label style="display:flex; align-items:flex-start; gap:0.5rem; font-size:0.9rem; cursor:pointer; line-height:1.4;">
+                             <input type="checkbox" style="margin-top:0.2rem; cursor:pointer;">
+                             <span><strong>{escaped_item}</strong>{owner_str}{deadline_str}</span>
+                           </label>"#
+                    );
                 }
-                html.push_str("</ul></div>");
+                html.push_str("</div></div>");
             }
 
             // Conversation Score / Rating
@@ -284,6 +313,7 @@ pub fn render_call_detail(
             <a href="/api/v1/calls/{call_id}/export?format=txt" download style="font-size:0.8rem; background:var(--bg-card); border:1px solid var(--border-color); padding:0.35rem 0.65rem; border-radius:0.25rem; color:var(--text-secondary);">TXT</a>
             <a href="/api/v1/calls/{call_id}/export?format=md" download style="font-size:0.8rem; background:var(--bg-card); border:1px solid var(--border-color); padding:0.35rem 0.65rem; border-radius:0.25rem; color:var(--text-secondary);">Markdown</a>
             <a href="/api/v1/calls/{call_id}/export?format=json" download style="font-size:0.8rem; background:var(--bg-card); border:1px solid var(--border-color); padding:0.35rem 0.65rem; border-radius:0.25rem; color:var(--text-secondary);">JSON</a>
+            <a href="/api/v1/calls/{call_id}/export?format=ics" download style="font-size:0.8rem; background:rgba(16,185,129,0.15); border:1px solid rgba(16,185,129,0.3); padding:0.35rem 0.65rem; border-radius:0.25rem; color:#6ee7b7; font-weight:600;" title="Download Calendar appointment">📅 .ICS</a>
           </div>
         </div>
 
@@ -529,9 +559,33 @@ pub fn render_call_detail(
               }});
             }}
           }}
+          function showToast(msg) {{
+            const t = document.createElement('div');
+            t.innerText = msg;
+            t.style.cssText = 'position:fixed; bottom:24px; right:24px; background:#10b981; color:white; padding:10px 18px; border-radius:6px; font-weight:600; z-index:9999; box-shadow:0 4px 12px rgba(0,0,0,0.3);';
+            document.body.appendChild(t);
+            setTimeout(() => t.remove(), 2500);
+          }}
         </script>
         "#
     );
 
     render_layout(&title, "calls", &body)
+}
+
+fn urlencoding_simple(s: &str) -> String {
+    let mut encoded = String::new();
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(b as char);
+            }
+            b' ' => encoded.push_str("%20"),
+            b'\n' => encoded.push_str("%0A"),
+            _ => {
+                let _ = write!(encoded, "%{:02X}", b);
+            }
+        }
+    }
+    encoded
 }

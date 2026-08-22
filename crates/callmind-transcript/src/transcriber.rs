@@ -140,7 +140,7 @@ impl AudioTranscriber {
         let aligned_words = TranscriptAligner::align(&stt_res.words, &diarization_res.turns);
 
         // 6. Build Structured Transcript with Roles, Normalization & RTL/LTR
-        let transcript = TranscriptBuilder::build_with_mapping(
+        let mut transcript = TranscriptBuilder::build_with_mapping(
             call_id,
             &aligned_words,
             &channel_mode,
@@ -148,6 +148,35 @@ impl AudioTranscriber {
             vocabulary,
             language_detection.distribution,
         );
+
+        // The short language probe is only a routing hint. Persist the language
+        // distribution derived from the final transcript so UI filters and
+        // downstream analysis reflect the text Whisper actually produced.
+        let mut language_counts = std::collections::HashMap::new();
+        let mut total_words = 0_u32;
+        for segment in &transcript.segments {
+            let word_count = segment.words.len() as u32;
+            if word_count > 0 {
+                *language_counts
+                    .entry(segment.language.clone())
+                    .or_insert(0_u32) += word_count;
+                total_words += word_count;
+            }
+        }
+        if total_words > 0 {
+            transcript.languages = language_counts
+                .into_iter()
+                .map(|(language, count)| callmind_language::LanguageProbability {
+                    language,
+                    probability: count as f32 / total_words as f32,
+                })
+                .collect();
+            transcript.languages.sort_by(|a, b| {
+                b.probability
+                    .partial_cmp(&a.probability)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
 
         Ok(transcript)
     }

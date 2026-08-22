@@ -39,6 +39,27 @@ auth:
   enabled: false
   api_key: null # e.g. "secret-api-key-here" or set CALLMIND_AUTH_API_KEY
 
+bots:
+  telegram:
+    enabled: false
+    bot_token: null # e.g. "123456789:ABCdefGhIJKlmNoPQRstuVWXyz" or set CALLMIND_TELEGRAM_BOT_TOKEN
+    allowed_chat_ids: [] # optional: restrict to specific family/user chat IDs
+
+  whatsapp:
+    enabled: false
+    phone_number_id: null # e.g. Meta Cloud API Phone Number ID
+    access_token: null # Meta Graph API Access Token
+    verify_token: null # Webhook challenge verification token
+
+  slack:
+    enabled: false
+    bot_token: null # e.g. "xoxb-your-token"
+    signing_secret: null
+
+  webhook:
+    enabled: true
+    secret_token: null # optional shared secret for incoming audio webhooks (Siri / iOS Shortcuts / n8n)
+
 watcher:
   enabled: false
   watch_dir: "./incoming"

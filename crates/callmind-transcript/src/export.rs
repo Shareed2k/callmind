@@ -86,6 +86,46 @@ impl TranscriptExporter {
         }
         out
     }
+
+    /// Export an event / appointment as standard RFC 5545 iCalendar format (.ics).
+    #[must_use]
+    pub fn to_ics(
+        call_id: &str,
+        title: &str,
+        summary: &str,
+        location: Option<&str>,
+        start_time: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> String {
+        let now_str = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let dtstart =
+            start_time.unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(24));
+        let dtend = dtstart + chrono::Duration::hours(1);
+        let dtstart_str = dtstart.format("%Y%m%dT%H%M%SZ").to_string();
+        let dtend_str = dtend.format("%Y%m%dT%H%M%SZ").to_string();
+
+        let clean_summary = summary.replace('\n', " ");
+        let clean_title = title.replace('\n', " ");
+        let loc_line = location.map_or_else(String::new, |loc| format!("LOCATION:{loc}\r\n"));
+
+        format!(
+            "BEGIN:VCALENDAR\r\n\
+             VERSION:2.0\r\n\
+             PRODID:-//CallMind//Conversation Intelligence//EN\r\n\
+             CALSCALE:GREGORIAN\r\n\
+             METHOD:PUBLISH\r\n\
+             BEGIN:VEVENT\r\n\
+             UID:{call_id}@callmind.local\r\n\
+             DTSTAMP:{now_str}\r\n\
+             DTSTART:{dtstart_str}\r\n\
+             DTEND:{dtend_str}\r\n\
+             SUMMARY:{clean_title}\r\n\
+             DESCRIPTION:{clean_summary}\r\n\
+             {loc_line}\
+             STATUS:CONFIRMED\r\n\
+             END:VEVENT\r\n\
+             END:VCALENDAR\r\n"
+        )
+    }
 }
 
 fn format_srt_time(ms: u64) -> String {

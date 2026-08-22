@@ -5,8 +5,9 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use callmind_api::{AppState, create_router};
@@ -250,7 +251,17 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         watcher.spawn(shutdown_rx);
     }
 
+    // Start background Telegram Bot if enabled in config
+    callmind_api::TelegramBotService::start(
+        config.clone(),
+        call_repo.clone(),
+        job_repo.clone(),
+        storage.clone(),
+        pool.clone(),
+    );
+
     // Initialize REST API State and Router
+    let shutdown_pool = pool.clone();
     let app_state = AppState::new(
         config.clone(),
         call_repo,
@@ -293,7 +304,59 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     let _ = shutdown_tx.send(true);
     cancellation_token.cancel();
     server_handle.abort();
-    worker_pool.wait().await;
+
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+    if tokio::time::timeout(SHUTDOWN_TIMEOUT, worker_pool.wait())
+        .await
+        .is_err()
+    {
+        warn!(
+            "Workers did not stop within {} seconds; returning active jobs to the queue",
+            SHUTDOWN_TIMEOUT.as_secs()
+        );
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let requeued = sqlx::query(
+            r#"
+            UPDATE jobs
+            SET status = 'pending',
+                attempt = MAX(attempt - 1, 0),
+                run_after = ?,
+                locked_at = NULL,
+                locked_by = NULL,
+                last_error = 'Interrupted by server shutdown',
+                completed_at = NULL
+            WHERE status = 'running'
+            "#,
+        )
+        .bind(&now)
+        .execute(&shutdown_pool)
+        .await
+        .map(|result| result.rows_affected())
+        .unwrap_or_else(|err| {
+            error!("Failed to return active jobs to the queue: {err}");
+            0
+        });
+
+        if let Err(err) = sqlx::query(
+            r#"
+            UPDATE calls
+            SET processing_status = 'pending', updated_at = ?
+            WHERE processing_status = 'processing'
+              AND id IN (SELECT call_id FROM jobs WHERE status = 'pending')
+            "#,
+        )
+        .bind(&now)
+        .execute(&shutdown_pool)
+        .await
+        {
+            error!("Failed to reset interrupted calls to pending: {err}");
+        }
+
+        info!("Requeued {requeued} active job(s); forcing process exit.");
+        std::process::exit(0);
+    }
+
     info!("CallMind Server stopped cleanly.");
 
     Ok(())

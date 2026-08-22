@@ -10,8 +10,11 @@ Analyze the transcript with deep precision and extract concrete factual data:
 - WHEN: Dates, times, schedules, deadlines, immediate actions.
 - OUTCOME: The exact conclusion or agreement reached.
 
-NEVER produce vague summaries like "the speakers discussed matters".
-Always include the concrete names, places, and facts from the conversation.
+Never invent, infer, or complete facts that are not explicitly present in the transcript.
+Do not introduce example names (such as John or Jane), locations, floors, dates, amounts,
+roles, promises, or outcomes unless the transcript states them. When information is absent,
+use null, an empty array, or a short statement that the detail was not provided.
+Include concrete names, places, and facts only when they are supported by transcript text.
 Output strictly valid JSON matching the schema.
 "#;
 
@@ -27,6 +30,7 @@ pub fn build_language_aware_analysis_prompt(
             r#"
 Проанализируй следующий записанный разговор ({organization_name}).
 ВАЖНОЕ ПРАВИЛО: Разговор на русском языке. Все значения в JSON (title, summary, reason, resolution, customer_intent, topics, key_facts, action_items) пиши СТРОГО НА РУССКОМ ЯЗЫКЕ. Извлекай конкретные имена, этажи, комнаты, локации и факты.
+ЗАПРЕЩЕНО придумывать отсутствующие в транскрипте имена, места, даты, суммы, роли, договоренности или результаты. Если данных нет, используй null, пустой список или прямо укажи, что деталь не названа.
 
 Транскрипт:
 ---
@@ -56,6 +60,7 @@ pub fn build_language_aware_analysis_prompt(
             r#"
 נתח את שיחת הטלפון המוקלטת הבאה ({organization_name}).
 כלל קריטי: השיחה היא בעברית. כל ערכי הטקסט ב-JSON (כותרת, סיכום, סיבה, תוצאה, נושאים, עובדות מפתח ומשימות) חייבים להיכתב בעברית טבעית, מדויקת ועשירה בפרטים עובדתיים: מי דיבר, איפה הם נמצאים, מה סוכם. שמור על שמות המפתחות ב-JSON באנגלית.
+אסור להמציא שמות, מקומות, קומות, תאריכים, סכומים, תפקידים או הסכמות שאינם מופיעים במפורש בתמליל. כאשר פרט חסר, השתמש ב-null, ברשימה ריקה או ציין שהפרט לא נאמר.
 
 תמליל השיחה:
 ---
@@ -84,6 +89,7 @@ pub fn build_language_aware_analysis_prompt(
         r#"
 Analyze the following recorded conversation ({organization_name}).
 Provide all analytical text values in detailed English with concrete facts: WHO spoke with whom, WHERE (floor, room, building), WHAT was discussed, and WHAT was agreed upon.
+Do not invent names, places, dates, amounts, roles, agreements, or outcomes. If a detail is not explicitly present in the transcript, use null, an empty list, or state that it was not provided.
 
 Transcript:
 ---

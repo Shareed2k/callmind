@@ -338,6 +338,66 @@ pub async fn export_transcript(
             "json",
             serde_json::to_string_pretty(&transcript).unwrap_or_default(),
         ),
+        "ics" | "calendar" => {
+            let analysis_row: Option<(String,)> =
+                sqlx::query_as("SELECT full_analysis_json FROM call_analyses WHERE call_id = ?")
+                    .bind(&call_id_str)
+                    .fetch_optional(&state.pool)
+                    .await
+                    .unwrap_or(None);
+
+            let (title, summary, location) = if let Some((raw_json,)) = analysis_row {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw_json) {
+                    let t = val
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("CallMind Event");
+                    let s = val
+                        .get("summary")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Event generated from CallMind conversation");
+                    let loc = val
+                        .get("entities")
+                        .and_then(|e| e.as_array())
+                        .and_then(|arr| {
+                            arr.iter()
+                                .find(|item| {
+                                    item.get("entity_type")
+                                        .and_then(|t| t.as_str())
+                                        .is_some_and(|t| {
+                                            t.contains("loc")
+                                                || t.contains("place")
+                                                || t.contains("address")
+                                        })
+                                })
+                                .and_then(|item| item.get("value").and_then(|v| v.as_str()))
+                        });
+                    (t.to_string(), s.to_string(), loc.map(ToString::to_string))
+                } else {
+                    (
+                        "CallMind Event".to_string(),
+                        "Event generated from CallMind".to_string(),
+                        None,
+                    )
+                }
+            } else {
+                (
+                    "CallMind Event".to_string(),
+                    "Event generated from CallMind".to_string(),
+                    None,
+                )
+            };
+
+            let ics_body = callmind_transcript::TranscriptExporter::to_ics(
+                &call_id_str,
+                &title,
+                &summary,
+                location.as_deref(),
+                None,
+            );
+
+            ("text/calendar; charset=utf-8", "ics", ics_body)
+        }
         _ => (
             "text/plain; charset=utf-8",
             "txt",

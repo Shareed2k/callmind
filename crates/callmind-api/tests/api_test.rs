@@ -193,3 +193,48 @@ async fn test_ui_views_rendering() {
     let res_ask = app.oneshot(req_ask).await.unwrap();
     assert_eq!(res_ask.status(), StatusCode::OK);
 }
+
+#[test]
+fn test_bot_response_formatter_and_ics() {
+    let raw_json = serde_json::json!({
+        "title": "Встреча у стоматолога и покупка продуктов",
+        "summary": "Анна договорилась о визите к стоматологу на вторник и попросила купить молоко и хлеб.",
+        "reason": "Запись на прием к врачу",
+        "action_items": [
+            { "text": "Купить молоко и свежий хлеб", "owner": "speaker_1", "deadline": "сегодня 18:00" },
+            { "text": "Прийти на прием к стоматологу", "owner": "speaker_2", "deadline": "вторник 14:00" }
+        ],
+        "key_facts": [
+            "Стоматология находится на 2 этаже",
+            "Код домофона 4521"
+        ],
+        "entities": [
+            { "entity_type": "location", "value": "ул. Ленина 45, каб. 12" },
+            { "entity_type": "phone", "value": "+972501234567" }
+        ]
+    }).to_string();
+
+    let call_id = "test-call-1234";
+    let formatted =
+        callmind_api::BotResponseFormatter::format(call_id, &raw_json, "127.0.0.1:8080");
+
+    assert_eq!(formatted.title, "Встреча у стоматолога и покупка продуктов");
+    assert!(formatted.text_markdown.contains("• [ ] Купить молоко"));
+    assert!(
+        formatted
+            .text_markdown
+            .contains("📍 *Key Facts & Details:*")
+    );
+    assert!(
+        formatted
+            .text_markdown
+            .contains("http://127.0.0.1:8080/calls/test-call-1234")
+    );
+
+    assert!(formatted.has_calendar_event);
+    assert!(formatted.ics_content.is_some());
+    let ics = formatted.ics_content.unwrap();
+    assert!(ics.contains("BEGIN:VCALENDAR"));
+    assert!(ics.contains("LOCATION:ул. Ленина 45, каб. 12"));
+    assert!(ics.contains("END:VCALENDAR"));
+}

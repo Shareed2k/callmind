@@ -79,22 +79,9 @@ impl SttRouter {
             return Ok((result, SttProfile::Hebrew));
         }
 
-        // 2. Explicit non-Hebrew detection (e.g. Russian, English) -> route directly to multilingual Whisper
-        if detection.primary != Language::Unknown
-            && detection.primary != Language::Hebrew
-            && !detection.mixed
-        {
-            let req = SttRequest {
-                audio,
-                language_hint: Some(detection.primary.clone()),
-                vocabulary,
-                word_timestamps: true,
-            };
-            let result = self.multilingual_engine.transcribe(req).await?;
-            return Ok((result, SttProfile::Multilingual));
-        }
-
-        // 3. Auto-detect / Code-switching mode: run Multilingual Whisper auto-detect
+        // 2. Use full-audio auto-detection for every non-Hebrew call. The short
+        // language probe is only reliable enough to select the specialized
+        // Hebrew model; it must not force a potentially wrong language hint.
         let req = SttRequest {
             audio,
             language_hint: None,

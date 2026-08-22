@@ -96,10 +96,20 @@ impl AnalysisEngine {
             organization_name,
             primary_lang,
         );
-        let llm_res: Result<LlmRawAnalysis, LlmError> = self
-            .llm
-            .generate_structured(&prompt, Some(CONVERSATION_ANALYSIS_SYSTEM_PROMPT))
-            .await;
+        let transcript_word_count: usize = transcript
+            .segments
+            .iter()
+            .map(|segment| segment.normalized_text.split_whitespace().count())
+            .sum();
+        let llm_res: Result<LlmRawAnalysis, LlmError> = if transcript_word_count < 4 {
+            Err(LlmError::Inference(
+                "Transcript is too short for reliable generative analysis".into(),
+            ))
+        } else {
+            self.llm
+                .generate_structured(&prompt, Some(CONVERSATION_ANALYSIS_SYSTEM_PROMPT))
+                .await
+        };
 
         let (
             title,

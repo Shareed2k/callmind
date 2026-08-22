@@ -108,6 +108,12 @@ pub fn create_router(state: AppState) -> Router {
         // Search & Ask routes
         .route("/search", get(search::search_calls))
         .route("/ask", post(search::ask_calls))
+        // Omnichannel Bot & Webhook routes (Siri, iOS Shortcuts, WhatsApp, n8n)
+        .route("/bots/webhook", post(crate::bots::handle_audio_webhook))
+        .route(
+            "/bots/whatsapp",
+            get(crate::bots::verify_whatsapp_webhook).post(crate::bots::handle_whatsapp_webhook),
+        )
         // System metrics route
         .route("/system/metrics", get(health::system_metrics))
         .route_layer(middleware::from_fn_with_state(

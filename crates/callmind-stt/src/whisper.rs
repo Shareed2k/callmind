@@ -96,6 +96,7 @@ impl WhisperCppEngine {
         let mut params =
             whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
         params.set_translate(false);
+        params.set_detect_language(true);
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
