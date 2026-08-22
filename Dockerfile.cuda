@@ -7,6 +7,7 @@ WORKDIR /usr/src/callmind
 
 # Install build dependencies, curl, and clang
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     curl \
     cmake \
     pkg-config \
