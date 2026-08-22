@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libclang-dev \
     libvulkan-dev \
     glslang-tools \
+    glslc \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace sources
