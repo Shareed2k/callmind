@@ -80,9 +80,11 @@ impl AudioBuffer {
         let mut left_samples = Vec::with_capacity(total_frames);
         let mut right_samples = Vec::with_capacity(total_frames);
 
-        for chunk in self.samples.chunks_exact(2) {
-            left_samples.push(chunk[0]);
-            right_samples.push(chunk[1]);
+        let mut i = 0;
+        while i + 1 < self.samples.len() {
+            left_samples.push(self.samples[i]);
+            right_samples.push(self.samples[i + 1]);
+            i += 2;
         }
 
         let left = Self {

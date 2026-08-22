@@ -1,6 +1,5 @@
 # Build artifacts
 /target
-Cargo.lock
 
 # Data & local databases
 /data
