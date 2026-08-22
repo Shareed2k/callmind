@@ -1,0 +1,10 @@
+target/
+data/
+models/
+.git/
+.github/
+docs/
+*.log
+*.sqlite
+*.db
+.DS_Store

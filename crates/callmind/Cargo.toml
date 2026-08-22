@@ -11,6 +11,8 @@ workspace = true
 [features]
 default = ["callmind-stt/metal"]
 metal = ["callmind-stt/metal"]
+cuda = ["callmind-stt/cuda"]
+vulkan = ["callmind-stt/vulkan"]
 cpu = ["callmind-stt/cpu"]
 
 [dependencies]

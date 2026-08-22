@@ -1,0 +1,50 @@
+services:
+  callmind:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: callmind-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./callmind.yaml:/app/callmind.yaml:ro
+    environment:
+      - RUST_LOG=info
+      - CALLMIND_SERVER_BIND=0.0.0.0:8080
+      - CALLMIND_LLM_ENDPOINT=http://ollama:11434
+      - CALLMIND_LLM_PROVIDER=ollama
+      - CALLMIND_LLM_MODEL=llama3.2:3b
+    depends_on:
+      - ollama
+    networks:
+      - callmind-net
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: callmind-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    networks:
+      - callmind-net
+
+    # Uncomment below to enable Nvidia GPU passthrough on Linux:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  ollama-models:
+
+networks:
+  callmind-net:
+    driver: bridge

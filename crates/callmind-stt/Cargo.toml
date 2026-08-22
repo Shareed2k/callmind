@@ -11,6 +11,8 @@ workspace = true
 [features]
 default = ["metal"]
 metal = ["whisper-rs/metal"]
+cuda = ["whisper-rs/cuda"]
+vulkan = ["whisper-rs/vulkan"]
 cpu = []
 
 [dependencies]
