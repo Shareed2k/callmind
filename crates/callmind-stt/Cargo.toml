@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [features]
-default = ["metal"]
+default = []
 metal = ["whisper-rs/metal"]
 cuda = ["whisper-rs/cuda"]
 vulkan = ["whisper-rs/vulkan"]
