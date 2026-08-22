@@ -176,7 +176,12 @@ curl -X POST "http://localhost:8080/api/v1/bots/webhook?sync=true" \
 
 ## 🐳 Docker & Docker Compose
 
-Run CallMind with hardware-accelerated speech processing and Ollama in containers:
+Pre-built Docker images are automatically published to **GitHub Container Registry (GHCR)**:
+- `ghcr.io/callmind/callmind:latest` (Universal CPU)
+- `ghcr.io/callmind/callmind:vulkan` (AMD Radeon, Intel Arc, Nvidia Vulkan GPU)
+- `ghcr.io/callmind/callmind:cuda` (Nvidia CUDA Tensor Core GPU)
+
+Run with Docker Compose:
 
 ```bash
 # 1. Universal CPU Mode (Default)

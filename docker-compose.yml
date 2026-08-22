@@ -3,6 +3,7 @@ services:
   # 1. CallMind (Default Universal CPU)
   # ----------------------------------------------------------------------------
   callmind:
+    image: ghcr.io/callmind/callmind:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -32,6 +33,7 @@ services:
   # Run via: docker compose --profile vulkan up -d
   # ----------------------------------------------------------------------------
   callmind-vulkan:
+    image: ghcr.io/callmind/callmind:vulkan
     build:
       context: .
       dockerfile: Dockerfile
@@ -64,6 +66,7 @@ services:
   # Run via: docker compose --profile cuda up -d
   # ----------------------------------------------------------------------------
   callmind-cuda:
+    image: ghcr.io/callmind/callmind:cuda
     build:
       context: .
       dockerfile: Dockerfile.cuda
