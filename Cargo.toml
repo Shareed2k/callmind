@@ -129,7 +129,7 @@ tempfile = "3.17"
 async-trait = "0.1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 html-escape = "0.2"
-whatlang = "0.16"
+whatlang = "0.18"
 
 minijinja = { version = "2.24", features = ["loader"] }
 prost = "0.14"
