@@ -180,7 +180,7 @@ jobs:
       # `stable`, leaving that claim unverified. Keep this pin in step with
       # Cargo.toml -- the action cannot read it.
       - name: Set up pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@1.94.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
