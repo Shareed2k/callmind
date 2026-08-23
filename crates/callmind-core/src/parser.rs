@@ -18,7 +18,7 @@ pub struct ParsedCallFilename {
 pub struct CallFilenameParser;
 
 impl CallFilenameParser {
-    /// Parse a filename (e.g. "Call recording סמי אינסטלטור_250820_142338.m4a" or "Call +972507361902_260705_142254.m4a").
+    /// Parse a filename (e.g. "Call recording משה כהן_250820_142338.m4a" or "Call +972500000000_260705_142254.m4a").
     #[must_use]
     pub fn parse(filename: &str) -> ParsedCallFilename {
         let name_without_ext = filename.rsplit_once('.').map_or(filename, |(base, _)| base);
@@ -116,10 +116,10 @@ mod tests {
 
     #[test]
     fn test_parse_hebrew_contact_recording() {
-        let filename = "Call recording סמי אינסטלטור_250820_142338.m4a";
+        let filename = "Call recording משה כהן_250820_142338.m4a";
         let parsed = CallFilenameParser::parse(filename);
 
-        assert_eq!(parsed.contact_name.as_deref(), Some("סמי אינסטלטור"));
+        assert_eq!(parsed.contact_name.as_deref(), Some("משה כהן"));
         assert_eq!(parsed.phone_number, None);
 
         let dt = parsed.started_at.unwrap();
@@ -133,10 +133,10 @@ mod tests {
 
     #[test]
     fn test_parse_international_phone_call() {
-        let filename = "Call +972507361902_260705_142254.m4a";
+        let filename = "Call +972500000000_260705_142254.m4a";
         let parsed = CallFilenameParser::parse(filename);
 
-        assert_eq!(parsed.phone_number.as_deref(), Some("+972507361902"));
+        assert_eq!(parsed.phone_number.as_deref(), Some("+972500000000"));
         assert_eq!(parsed.contact_name, None);
 
         let dt = parsed.started_at.unwrap();
@@ -149,10 +149,10 @@ mod tests {
 
     #[test]
     fn test_parse_russian_contact_recording() {
-        let filename = "Call recording Шамиль Работа Bringg_240513_111449.m4a";
+        let filename = "Call recording Иван Работа Acme_240513_111449.m4a";
         let parsed = CallFilenameParser::parse(filename);
 
-        assert_eq!(parsed.contact_name.as_deref(), Some("Шамиль Работа Bringg"));
+        assert_eq!(parsed.contact_name.as_deref(), Some("Иван Работа Acme"));
         assert_eq!(parsed.phone_number, None);
 
         let dt = parsed.started_at.unwrap();

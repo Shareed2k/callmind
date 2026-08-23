@@ -1,5 +1,8 @@
 use callmind_core::{Call, CallDirection, OrgId};
-use callmind_db::{CallRepository, SqliteCallRepository, create_sqlite_pool, run_migrations};
+use callmind_db::{
+    CallRepository, SqlCallRepository, SqlSearchIndex, create_sqlite_pool, orm_connection,
+    run_migrations,
+};
 use callmind_llm::MockLlmEngine;
 use callmind_search::{AskCallsRequest, AskEngine, IndexCallParams, SearchEngine, SearchFilter};
 use std::sync::Arc;
@@ -13,17 +16,12 @@ async fn test_fts5_multilingual_search_and_ask_pipeline() {
         .unwrap();
     run_migrations(&pool).await.unwrap();
 
-    let call_repo = SqliteCallRepository::new(pool.clone());
-    let search_engine = SearchEngine::new(pool.clone());
+    let call_repo = SqlCallRepository::new(orm_connection(&pool));
+    let search_engine = SearchEngine::new(Arc::new(SqlSearchIndex::new(orm_connection(&pool))));
 
-    let org_id = OrgId::generate();
-    sqlx::query("INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)")
-        .bind(org_id.to_string())
-        .bind("Test Search Org")
-        .bind(chrono::Utc::now().to_rfc3339())
-        .execute(&pool)
-        .await
-        .unwrap();
+    // The migration seeds this organization, so the test needs no raw SQL of
+    // its own -- which is what keeps `callmind-search` free of a database driver.
+    let org_id = OrgId::DEFAULT;
 
     // 1. Create Call 1 (Hebrew - Cancellation)
     let call1 = Call::new(
@@ -122,4 +120,73 @@ async fn test_fts5_multilingual_search_and_ask_pipeline() {
     assert!(!ask_res.citations.is_empty());
     assert!(ask_res.answer.contains("relocation"));
     assert_eq!(ask_res.citations[0].call_id, call1.id);
+}
+
+/// Hebrew attaches its article and prepositions to the front of a word, so a
+/// stored `השיחה` ("the call") could not be found by searching `שיחה` once free
+/// text moved from `LIKE '%...%'` to FTS5 prefix terms. Verified against a real
+/// index, not just the query builder.
+#[tokio::test]
+async fn test_hebrew_proclitic_search_finds_prefixed_forms() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("hebrew_search.db");
+    let pool = create_sqlite_pool(db_path.to_str().unwrap(), 5)
+        .await
+        .unwrap();
+    run_migrations(&pool).await.unwrap();
+
+    let call_repo = SqlCallRepository::new(orm_connection(&pool));
+    let search_engine = SearchEngine::new(Arc::new(SqlSearchIndex::new(orm_connection(&pool))));
+    let org_id = OrgId::DEFAULT;
+
+    let call = Call::new(
+        org_id,
+        Some("he-1".into()),
+        CallDirection::Incoming,
+        None,
+        None,
+        None,
+    );
+    call_repo.create(&call).await.unwrap();
+
+    search_engine
+        .index_call(IndexCallParams {
+            call_id: call.id,
+            org_id,
+            // Definite article prefix, as an LLM-generated Hebrew title has.
+            title: "השיחה",
+            summary: "הלקוח ביקש לבדוק את בהזמנה שלו",
+            transcript: "שלום",
+            topics: &[],
+            entities: &[],
+            reason: None,
+            resolution: None,
+        })
+        .await
+        .unwrap();
+
+    let find = |query: &str| {
+        let engine = search_engine.clone();
+        let q = query.to_string();
+        async move {
+            engine
+                .search(&SearchFilter {
+                    query: q,
+                    organization_id: Some(org_id),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .len()
+        }
+    };
+
+    // The bare stem must find the prefixed stored form.
+    assert_eq!(find("שיחה").await, 1, "bare stem should match 'השיחה'");
+    // The exact stored form still works.
+    assert_eq!(find("השיחה").await, 1);
+    // A prefixed word in the summary is reachable from its stem too.
+    assert_eq!(find("הזמנה").await, 1, "stem should match 'בהזמנה'");
+    // And an unrelated term still misses.
+    assert_eq!(find("מכונית").await, 0);
 }

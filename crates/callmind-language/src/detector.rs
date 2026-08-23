@@ -148,24 +148,42 @@ impl LanguageEngine for SamplingLanguageEngine {
             sample_windows.push(audio.clone());
         }
 
-        // Dynamic multi-window language identification
-        let mut samples_res: Vec<Vec<LanguageProbability>> = Vec::new();
-        for window in &sample_windows {
-            if let Some(ref det) = self.detector {
-                let res = det(window);
-                if !res.is_empty() {
-                    samples_res.push(res);
-                    continue;
-                }
-            }
-
-            // Signal-level fallback when running without dedicated acoustic detector;
-            // actual language classification is confirmed during STT decoding.
-            samples_res.push(vec![LanguageProbability {
+        // Signal-level fallback when running without a dedicated acoustic
+        // detector; actual language classification is confirmed during STT
+        // decoding.
+        let unknown = || {
+            vec![LanguageProbability {
                 language: Language::Unknown,
                 probability: 1.0,
-            }]);
-        }
+            }]
+        };
+
+        // Dynamic multi-window language identification.
+        //
+        // The detector is synchronous and CPU/GPU-bound — in production it is a
+        // full Whisper forward pass per window — so running it inline here
+        // blocked a runtime worker thread for the whole loop. Windows stay
+        // sequential inside the one blocking task, so GPU access is no more
+        // concurrent than before.
+        let samples_res: Vec<Vec<LanguageProbability>> = match self.detector.clone() {
+            Some(det) => {
+                let windows = sample_windows;
+                tokio::task::spawn_blocking(move || {
+                    windows
+                        .iter()
+                        .map(|window| {
+                            let res = det(window);
+                            if res.is_empty() { unknown() } else { res }
+                        })
+                        .collect()
+                })
+                .await
+                .map_err(|e| {
+                    LanguageError::Detection(format!("language detection task failed: {e}"))
+                })?
+            }
+            None => sample_windows.iter().map(|_| unknown()).collect(),
+        };
 
         Ok(Self::aggregate_distributions(
             &samples_res,
@@ -227,5 +245,47 @@ mod tests {
         let det = engine.detect(&audio, &[]).await.unwrap();
         assert_eq!(det.primary, Language::Russian);
         assert!((det.confidence() - 0.90).abs() < 0.01);
+    }
+
+    /// The detector is a synchronous Whisper forward pass in production. It used
+    /// to run inline inside `async fn detect`, so it starved the executor.
+    ///
+    /// `#[tokio::test]` gives a current-thread runtime, so if the detector still
+    /// blocked the executor the spawned ticker below could never run and the
+    /// detector would spin to its deadline with `ticked` still false.
+    #[tokio::test]
+    async fn detector_does_not_block_the_runtime() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ticked = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&ticked);
+
+        let engine = SamplingLanguageEngine::new().with_detector(move |_buf| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !observed.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            vec![LanguageProbability {
+                language: Language::English,
+                probability: 0.9,
+            }]
+        });
+
+        let setter = Arc::clone(&ticked);
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            setter.store(true, Ordering::SeqCst);
+        });
+
+        let audio = AudioBuffer::new(16000, 1, vec![0.1; 16000 * 2]);
+        let detection = engine.detect(&audio, &[]).await.unwrap();
+
+        // Read the flag with no intervening await, so a blocked executor cannot
+        // sneak the ticker in after the fact.
+        assert!(
+            ticked.load(Ordering::SeqCst),
+            "the async ticker never ran: the detector blocked the runtime thread"
+        );
+        assert_eq!(detection.primary, Language::English);
     }
 }

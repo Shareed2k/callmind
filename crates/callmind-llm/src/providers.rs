@@ -2,11 +2,25 @@ use crate::errors::LlmError;
 use crate::local::LocalLlmEngine;
 use crate::traits::LlmEngine;
 use async_trait::async_trait;
-use callmind_config::LlmConfig;
+use callmind_config::{LlmConfig, SUPPORTED_LLM_PROVIDERS};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
+
+/// Build an HTTP client with the given timeout.
+///
+/// `build().unwrap_or_default()` silently handed back a client with *no*
+/// timeout, so a hung provider would hang the job forever.
+fn http_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .unwrap_or_else(|e| {
+            warn!("Falling back to default HTTP client ({e}); request timeout not applied");
+            reqwest::Client::new()
+        })
+}
 
 /// Factory function creating the appropriate `LlmEngine` from configuration.
 #[must_use]
@@ -25,7 +39,16 @@ pub fn create_llm_engine(config: &LlmConfig) -> Arc<dyn LlmEngine> {
                 api_key,
             ))
         }
-        _ => Arc::new(LocalLlmEngine::new(None, None)),
+        "heuristic" | "local" => Arc::new(LocalLlmEngine::new(None, None)),
+        other => {
+            // Reachable only if validation was bypassed; a typo used to
+            // silently degrade "AI analysis" to keyword heuristics forever.
+            warn!(
+                "Unknown llm.provider {other:?}; falling back to local heuristics. \
+                 Supported providers: {SUPPORTED_LLM_PROVIDERS:?}"
+            );
+            Arc::new(LocalLlmEngine::new(None, None))
+        }
     }
 }
 
@@ -41,10 +64,7 @@ impl OllamaEngine {
     pub fn new(endpoint: &str, model: &str) -> Self {
         let base = endpoint.trim_end_matches('/');
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(300))
-                .build()
-                .unwrap_or_default(),
+            client: http_client(Duration::from_secs(300)),
             endpoint: format!("{base}/api/generate"),
             model: model.to_string(),
             semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -141,6 +161,15 @@ impl LlmEngine for OllamaEngine {
     }
 
     async fn generate_text(&self, prompt: &str, system: Option<&str>) -> Result<String, LlmError> {
+        // Same single-flight permit `generate_json` takes. Without it this path
+        // bypassed the serialisation entirely and could pile concurrent
+        // requests onto one Ollama instance.
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|e| LlmError::Provider(format!("LLM semaphore acquire error: {e}")))?;
+
         let body = json!({
             "model": self.model,
             "prompt": prompt,
@@ -186,10 +215,7 @@ impl OpenAiEngine {
         };
 
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(60))
-                .build()
-                .unwrap_or_default(),
+            client: http_client(Duration::from_secs(60)),
             endpoint: url,
             model: model.to_string(),
             api_key,
@@ -302,10 +328,7 @@ impl AnthropicEngine {
         };
 
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(60))
-                .build()
-                .unwrap_or_default(),
+            client: http_client(Duration::from_secs(60)),
             endpoint: url,
             model: model.to_string(),
             api_key,

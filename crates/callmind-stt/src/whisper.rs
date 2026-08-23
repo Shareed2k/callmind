@@ -29,16 +29,28 @@ impl WhisperCppEngine {
     }
 
     fn get_or_load_context(&self) -> Result<Arc<whisper_rs::WhisperContext>, SttError> {
-        let mut lock = self
-            .cached_ctx
+        Self::load_context(&self.cached_ctx, &self.model_path)
+    }
+
+    /// Load (or return the cached) Whisper context.
+    ///
+    /// Takes the pieces it needs rather than `&self` so that callers can run it
+    /// inside `spawn_blocking`: this reads multi-GB weights off disk and
+    /// initialises the GPU backend while holding the mutex, which must never
+    /// happen on an async runtime thread.
+    fn load_context(
+        cached_ctx: &Mutex<Option<Arc<whisper_rs::WhisperContext>>>,
+        model_path: &Path,
+    ) -> Result<Arc<whisper_rs::WhisperContext>, SttError> {
+        let mut lock = cached_ctx
             .lock()
             .map_err(|e| SttError::Inference(e.to_string()))?;
         if let Some(ref ctx) = *lock {
             return Ok(ctx.clone());
         }
 
-        let model_path_str = self.model_path.to_string_lossy().to_string();
-        if !self.model_path.exists() {
+        let model_path_str = model_path.to_string_lossy().to_string();
+        if !model_path.exists() {
             return Err(SttError::ModelLoad {
                 path: model_path_str,
                 message: "Whisper model weights file not found on disk. Please download required model before transcribing.".to_string(),
@@ -122,11 +134,16 @@ impl SttEngine for WhisperCppEngine {
             return Err(SttError::InvalidAudio);
         }
 
-        let ctx = self.get_or_load_context()?;
         let audio_samples = request.audio.to_mono().samples;
         let lang_hint = request.language_hint.as_ref().map(|l| l.code().to_string());
+        let cached_ctx = self.cached_ctx.clone();
+        let model_path = self.model_path.clone();
 
         let result = tokio::task::spawn_blocking(move || -> Result<SttResult, SttError> {
+            // Loaded here, not before the spawn: on a cold cache this reads the
+            // model off disk and spins up Metal/CUDA, which stalled every task
+            // on the runtime — including the HTTP handlers.
+            let ctx = Self::load_context(&cached_ctx, &model_path)?;
             let mut state = ctx
                 .create_state()
                 .map_err(|e| SttError::Inference(e.to_string()))?;

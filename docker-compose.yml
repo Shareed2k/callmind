@@ -10,6 +10,10 @@ services:
       args:
         ACCELERATION: cpu
     container_name: callmind-server
+    # Longer than the binary's own worker-shutdown wait, so the requeue of
+    # in-flight jobs actually runs before Docker sends SIGKILL. Docker's
+    # default is 10s, which raced the requeue exactly.
+    stop_grace_period: 30s
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -40,6 +44,10 @@ services:
       args:
         ACCELERATION: vulkan
     container_name: callmind-vulkan-server
+    # Longer than the binary's own worker-shutdown wait, so the requeue of
+    # in-flight jobs actually runs before Docker sends SIGKILL. Docker's
+    # default is 10s, which raced the requeue exactly.
+    stop_grace_period: 30s
     profiles: ["vulkan"]
     restart: unless-stopped
     ports:
@@ -71,6 +79,10 @@ services:
       context: .
       dockerfile: Dockerfile.cuda
     container_name: callmind-cuda-server
+    # Longer than the binary's own worker-shutdown wait, so the requeue of
+    # in-flight jobs actually runs before Docker sends SIGKILL. Docker's
+    # default is 10s, which raced the requeue exactly.
+    stop_grace_period: 30s
     profiles: ["cuda"]
     restart: unless-stopped
     ports:

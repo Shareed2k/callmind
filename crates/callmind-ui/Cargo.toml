@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+minijinja.workspace = true
 callmind-core.workspace = true
 callmind-transcript.workspace = true
 callmind-analysis.workspace = true

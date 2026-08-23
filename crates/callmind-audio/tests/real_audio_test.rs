@@ -1,22 +1,33 @@
 use callmind_audio::{AudioDecoder, AudioResampler, ChannelAnalyzer};
 use callmind_vad::{EnergyVadEngine, VadEngine};
-use std::path::Path;
 
+/// Decode a directory of real recordings, given `CALLMIND_TEST_AUDIO_DIR`.
+///
+/// The filenames used to be hard-coded, which committed real contact names and
+/// a real phone number into the repository.
 #[tokio::test]
-#[ignore = "Requires local /Volumes/calls dataset"]
+#[ignore = "Set CALLMIND_TEST_AUDIO_DIR to a directory of real recordings"]
 async fn test_decode_multiple_real_calls_from_volume() {
-    let call_files = [
-        "/Volumes/calls/Call 033765660_260621_150956.m4a",
-        "/Volumes/calls/Call recording סמי אינסטלטור_241229_091022.m4a",
-        "/Volumes/calls/Call recording Шамиль Работа Bringg_240513_111449.m4a",
-        "/Volumes/calls/Call recording Мама_240506_105603.m4a",
-    ];
+    let Some(dir) = std::env::var_os("CALLMIND_TEST_AUDIO_DIR") else {
+        panic!("set CALLMIND_TEST_AUDIO_DIR to run this test");
+    };
+
+    let mut call_files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .expect("CALLMIND_TEST_AUDIO_DIR is not readable")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| matches!(e.to_lowercase().as_str(), "m4a" | "wav" | "mp3"))
+        })
+        .collect();
+    call_files.sort();
+    call_files.truncate(4);
+    assert!(!call_files.is_empty(), "no audio files in {dir:?}");
 
     for file_path in call_files {
-        let p = Path::new(file_path);
-        if !p.exists() {
-            continue;
-        }
+        let p = file_path.as_path();
 
         println!("\n>>> Testing real call: {:?}", p.file_name().unwrap());
         let decoded = AudioDecoder::decode_file(p).expect("Failed to decode real file");

@@ -1,0 +1,25 @@
+[package]
+name = "callmind-worker-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "gRPC contract between the CallMind service and remote processing workers"
+
+[lints]
+workspace = true
+
+[dependencies]
+callmind-core.workspace = true
+callmind-transcript.workspace = true
+callmind-language.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+prost.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+protoc-bin-vendored = "3.2"

@@ -1,0 +1,39 @@
+# Configuration for `cargo audit`, run by .github/workflows/checks.yml.
+
+[advisories]
+ignore = [
+    # rsa 0.9.10 — Marvin Attack timing sidechannel (medium, no fixed release).
+    #
+    # Not reachable: rsa enters Cargo.lock only as an optional dependency of
+    # sqlx-mysql, and this workspace enables only sqlx's sqlite backend.
+    # `cargo tree -i rsa --target all` reports "nothing to print", i.e. no
+    # activated path exists and it is never compiled in.
+    #
+    # Revisit if a MySQL backend is ever added — see the driver match in
+    # crates/callmind/src/main.rs, which currently rejects everything but
+    # "sqlite".
+    "RUSTSEC-2023-0071",
+
+    # rkyv 0.7.46 — out-of-bounds reads on archives containing Rc/Arc.
+    #
+    # Not reachable, same shape as the entry above: `rust_decimal` (pulled in by
+    # sea-orm) declares rkyv as an *optional* dependency and nothing enables that
+    # feature. Verified two ways — `cargo tree -i rkyv --target all` reports
+    # "nothing to print", and `target/debug/deps` contains no rkyv compilation
+    # unit at all.
+    #
+    # The advisory's fix is rkyv >= 0.8.17, a major bump that only rust_decimal
+    # can make. Revisit if anything ever enables `rust_decimal/rkyv`, at which
+    # point this stops being a false positive.
+    "RUSTSEC-2026-0235",
+]
+
+# Known, accepted warnings (informational — `cargo audit` does not fail on these):
+#
+# RUSTSEC-2026-0150 — audiopus_sys 0.2.2 is unmaintained.
+#   Reached via `opus 0.3.1`, which callmind-audio needs to decode the OGG/Opus
+#   voice notes WhatsApp and Telegram send; Symphonia has no Opus decoder.
+#   It is a thin `-sys` binding over libopus (itself actively maintained), so the
+#   exposure is the build glue rather than the codec. If it becomes a problem,
+#   `magnum-opus` is a maintained fork that vendors libopus instead of relying on
+#   pkg-config.

@@ -1,3 +1,10 @@
+//! Configuration loading: YAML file, environment overrides, and validation.
+//!
+//! Precedence is file, then environment. Validation runs at startup and fails
+//! loudly on a misconfiguration rather than degrading silently — an unknown
+//! `llm.provider`, for instance, used to fall through to keyword heuristics with
+//! no log line.
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -47,6 +54,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub bots: BotsConfig,
+
+    #[serde(default)]
+    pub workers: WorkersConfig,
 }
 
 impl AppConfig {
@@ -62,7 +72,13 @@ impl AppConfig {
                 })?;
                 serde_yaml::from_str::<Self>(&content)?
             } else {
-                Self::default()
+                // An explicitly requested path is a user instruction. Silently
+                // falling back to defaults here meant a typo'd `--config`
+                // started the server with an entirely different configuration.
+                return Err(ConfigError::Validation(format!(
+                    "configuration file {} does not exist",
+                    path_ref.display()
+                )));
             }
         } else if Path::new("callmind.yaml").exists() {
             let content = fs::read_to_string("callmind.yaml").map_err(|e| ConfigError::Io {
@@ -87,34 +103,86 @@ impl AppConfig {
 
     /// Apply environment variable overrides (e.g., `CALLMIND_SERVER_BIND="0.0.0.0:8080"`).
     pub fn apply_env_overrides(&mut self) {
-        if let Ok(val) = std::env::var("CALLMIND_SERVER_BIND") {
+        self.apply_overrides_from(|key| std::env::var(key).ok());
+    }
+
+    /// Override body with an injectable lookup, so the mapping is testable
+    /// without mutating process environment (`set_var` is unsafe in edition 2024).
+    pub fn apply_overrides_from<F>(&mut self, lookup: F)
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(val) = lookup("CALLMIND_SERVER_BIND") {
             self.server.bind = val;
         }
-        if let Ok(val) = std::env::var("CALLMIND_DATABASE_URL") {
+        if let Some(val) = lookup("CALLMIND_DATABASE_URL") {
             self.database.url = val;
         }
-        if let Ok(val) = std::env::var("CALLMIND_STORAGE_PATH") {
+        if let Some(val) = lookup("CALLMIND_STORAGE_PATH") {
             self.storage.path = PathBuf::from(val);
         }
-        if let Ok(Ok(parsed)) = std::env::var("CALLMIND_JOBS_WORKERS").map(|v| v.parse::<usize>()) {
+        if let Some(Ok(parsed)) = lookup("CALLMIND_JOBS_WORKERS").map(|v| v.parse::<usize>()) {
             self.jobs.workers = parsed;
         }
-        if let Ok(val) = std::env::var("CALLMIND_AUTH_API_KEY") {
+        if let Some(val) = lookup("CALLMIND_AUTH_API_KEY") {
             if !val.trim().is_empty() {
                 self.auth.api_key = Some(val);
                 self.auth.enabled = true;
             }
         }
-        if let Ok(val) = std::env::var("CALLMIND_TELEGRAM_BOT_TOKEN") {
+        if let Some(val) = lookup("CALLMIND_TELEGRAM_BOT_TOKEN") {
             if !val.trim().is_empty() {
                 self.bots.telegram.bot_token = Some(val);
                 self.bots.telegram.enabled = true;
             }
         }
-        if let Ok(val) = std::env::var("CALLMIND_WHATSAPP_ACCESS_TOKEN") {
+        if let Some(val) = lookup("CALLMIND_EVOLUTION_API_KEY") {
             if !val.trim().is_empty() {
-                self.bots.whatsapp.access_token = Some(val);
-                self.bots.whatsapp.enabled = true;
+                self.bots.evolution.api_key = Some(val);
+                self.bots.evolution.enabled = true;
+            }
+        }
+        if let Some(val) = lookup("CALLMIND_EVOLUTION_BASE_URL") {
+            if !val.trim().is_empty() {
+                self.bots.evolution.base_url = Some(val);
+            }
+        }
+        if let Some(val) = lookup("CALLMIND_EVOLUTION_INSTANCE") {
+            if !val.trim().is_empty() {
+                self.bots.evolution.instance = Some(val);
+            }
+        }
+        if let Some(val) = lookup("CALLMIND_EVOLUTION_WEBHOOK_TOKEN") {
+            if !val.trim().is_empty() {
+                self.bots.evolution.webhook_token = Some(val);
+            }
+        }
+        if let Some(val) = lookup("CALLMIND_WEBHOOK_SECRET_TOKEN") {
+            if !val.trim().is_empty() {
+                self.bots.webhook.secret_token = Some(val);
+            }
+        }
+        // docker-compose.yml sets all three of these; without them the
+        // container silently kept the baked-in `http://localhost:11434` and
+        // could never reach the `ollama` service.
+        if let Some(val) = lookup("CALLMIND_LLM_PROVIDER") {
+            if !val.trim().is_empty() {
+                self.llm.provider = val;
+            }
+        }
+        if let Some(val) = lookup("CALLMIND_LLM_ENDPOINT") {
+            if !val.trim().is_empty() {
+                self.llm.endpoint = val;
+            }
+        }
+        if let Some(val) = lookup("CALLMIND_LLM_MODEL") {
+            if !val.trim().is_empty() {
+                self.llm.model = val;
+            }
+        }
+        if let Some(val) = lookup("CALLMIND_LLM_API_KEY") {
+            if !val.trim().is_empty() {
+                self.llm.api_key = Some(val);
             }
         }
     }
@@ -140,6 +208,26 @@ impl AppConfig {
             return Err(ConfigError::Validation(
                 "auth.enabled is true, but auth.api_key is empty or unconfigured".into(),
             ));
+        }
+        if self.bots.evolution.enabled {
+            for (field, value) in [
+                ("base_url", &self.bots.evolution.base_url),
+                ("instance", &self.bots.evolution.instance),
+                ("api_key", &self.bots.evolution.api_key),
+            ] {
+                if value.as_deref().unwrap_or("").trim().is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "bots.evolution.enabled is true, but bots.evolution.{field} is not set"
+                    )));
+                }
+            }
+        }
+        let provider = self.llm.provider.trim().to_lowercase();
+        if !SUPPORTED_LLM_PROVIDERS.contains(&provider.as_str()) {
+            return Err(ConfigError::Validation(format!(
+                "llm.provider {:?} is not supported; expected one of {:?}",
+                self.llm.provider, SUPPORTED_LLM_PROVIDERS
+            )));
         }
         Ok(())
     }
@@ -281,6 +369,36 @@ impl Default for JobsConfig {
     }
 }
 
+/// gRPC listener for remote processing workers.
+///
+/// A separate port from the HTTP surface so the worker interface can be
+/// firewalled independently of anything a browser talks to.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkersConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default = "default_workers_bind")]
+    pub bind: String,
+}
+
+fn default_workers_bind() -> String {
+    "127.0.0.1:8081".to_string()
+}
+
+/// Provider strings the LLM factory understands. Validated at startup so a typo
+/// fails loudly instead of silently degrading analysis to keyword heuristics.
+pub const SUPPORTED_LLM_PROVIDERS: &[&str] = &[
+    "ollama",
+    "openai",
+    "groq",
+    "vllm",
+    "anthropic",
+    "claude",
+    "heuristic",
+    "local",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LlmConfig {
     #[serde(default = "default_llm_provider")]
@@ -367,7 +485,7 @@ pub struct BotsConfig {
     pub telegram: TelegramBotConfig,
 
     #[serde(default)]
-    pub whatsapp: WhatsAppBotConfig,
+    pub evolution: EvolutionBotConfig,
 
     #[serde(default)]
     pub slack: SlackBotConfig,
@@ -388,19 +506,50 @@ pub struct TelegramBotConfig {
     pub allowed_chat_ids: Vec<i64>,
 }
 
+/// Self-hosted [Evolution API](https://evolution-api.com) WhatsApp gateway.
+///
+/// Replaces the Meta Cloud API integration, which needed business verification
+/// and a `phone_number_id` and never had a working message handler. Evolution
+/// pairs with an ordinary WhatsApp account over QR.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WhatsAppBotConfig {
+pub struct EvolutionBotConfig {
     #[serde(default)]
     pub enabled: bool,
 
+    /// Base URL of the Evolution API deployment, e.g. `http://localhost:8080`.
     #[serde(default)]
-    pub phone_number_id: Option<String>,
+    pub base_url: Option<String>,
 
+    /// Instance name created in Evolution API.
     #[serde(default)]
-    pub access_token: Option<String>,
+    pub instance: Option<String>,
 
+    /// Value for the `ApiKey` header (global or instance key).
     #[serde(default)]
-    pub verify_token: Option<String>,
+    pub api_key: Option<String>,
+
+    /// Shared secret required on the inbound webhook. Evolution does not sign
+    /// its webhooks, so without this anyone who can reach the route could inject
+    /// fabricated calls.
+    #[serde(default)]
+    pub webhook_token: Option<String>,
+
+    /// Optional allowlist of sender numbers (digits only, no `@s.whatsapp.net`).
+    /// Empty means allow everyone the instance can receive from.
+    #[serde(default)]
+    pub allowed_numbers: Vec<String>,
+
+    /// How long to wait for analysis before giving up on replying with results.
+    ///
+    /// Generous because the first call after startup also pays for loading the
+    /// Whisper weights: measured at ~305s for a 5-second voice note on a cold
+    /// process, against ~20s once the model is resident.
+    #[serde(default = "default_result_timeout_secs")]
+    pub result_timeout_secs: u64,
+}
+
+fn default_result_timeout_secs() -> u64 {
+    600
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -450,6 +599,60 @@ impl Default for ModelsConfig {
 mod tests {
     use super::*;
 
+    /// docker-compose.yml sets the three LLM variables; none of them were
+    /// wired, so the container silently kept `http://localhost:11434` and could
+    /// never reach the `ollama` service.
+    #[test]
+    fn test_env_overrides_cover_compose_and_secret_vars() {
+        let env = |key: &str| -> Option<String> {
+            match key {
+                "CALLMIND_LLM_ENDPOINT" => Some("http://ollama:11434".to_string()),
+                "CALLMIND_LLM_PROVIDER" => Some("ollama".to_string()),
+                "CALLMIND_LLM_MODEL" => Some("llama3.2:3b".to_string()),
+                "CALLMIND_LLM_API_KEY" => Some("llm-key".to_string()),
+                "CALLMIND_WEBHOOK_SECRET_TOKEN" => Some("hook-secret".to_string()),
+                "CALLMIND_EVOLUTION_BASE_URL" => Some("http://evolution:8080".to_string()),
+                "CALLMIND_EVOLUTION_INSTANCE" => Some("family".to_string()),
+                "CALLMIND_EVOLUTION_API_KEY" => Some("evo-key".to_string()),
+                "CALLMIND_EVOLUTION_WEBHOOK_TOKEN" => Some("hook-token".to_string()),
+                "CALLMIND_JOBS_WORKERS" => Some("7".to_string()),
+                _ => None,
+            }
+        };
+
+        let mut config = AppConfig::default();
+        config.apply_overrides_from(env);
+
+        assert_eq!(config.llm.endpoint, "http://ollama:11434");
+        assert_eq!(config.llm.provider, "ollama");
+        assert_eq!(config.llm.model, "llama3.2:3b");
+        assert_eq!(config.llm.api_key.as_deref(), Some("llm-key"));
+        assert_eq!(
+            config.bots.webhook.secret_token.as_deref(),
+            Some("hook-secret")
+        );
+        assert_eq!(
+            config.bots.evolution.base_url.as_deref(),
+            Some("http://evolution:8080")
+        );
+        assert_eq!(config.bots.evolution.instance.as_deref(), Some("family"));
+        assert_eq!(config.bots.evolution.api_key.as_deref(), Some("evo-key"));
+        assert_eq!(
+            config.bots.evolution.webhook_token.as_deref(),
+            Some("hook-token")
+        );
+        assert!(
+            config.bots.evolution.enabled,
+            "supplying an API key should enable the channel"
+        );
+        assert_eq!(config.jobs.workers, 7);
+
+        // Absent variables must leave the configured value untouched.
+        let mut untouched = AppConfig::default();
+        untouched.apply_overrides_from(|_| None);
+        assert_eq!(untouched, AppConfig::default());
+    }
+
     #[test]
     fn test_default_config_validates() {
         let config = AppConfig::default();
@@ -477,5 +680,39 @@ jobs:
         assert_eq!(config.server.body_limit_mb, 100);
         assert_eq!(config.database.url, ":memory:");
         assert_eq!(config.jobs.workers, 8);
+    }
+
+    /// A typo'd `llm.provider` used to fall through to keyword heuristics with
+    /// no log line, so "AI analysis" silently became regex forever.
+    #[test]
+    fn test_unknown_llm_provider_is_rejected() {
+        let mut config = AppConfig::default();
+        assert!(config.validate().is_ok(), "default provider must be valid");
+
+        config.llm.provider = "olama".to_string();
+        let err = config.validate().expect_err("typo must not validate");
+        assert!(
+            err.to_string().contains("olama"),
+            "error should name the bad value, got: {err}"
+        );
+
+        // Case and surrounding whitespace are tolerated.
+        config.llm.provider = "  OpenAI ".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    /// An explicit `--config /typo.yaml` used to silently start the server on
+    /// built-in defaults instead of reporting the bad path.
+    #[test]
+    fn test_missing_explicit_config_path_is_an_error() {
+        let missing = std::path::Path::new("definitely/not/here/callmind.yaml");
+        assert!(!missing.exists());
+
+        let err = AppConfig::load_from_file_or_default(Some(missing))
+            .expect_err("a missing explicit path must fail");
+        assert!(
+            err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -3,12 +3,16 @@ use callmind_core::Language;
 /// System prompt for conversational intelligence analysis across Hebrew, Russian, and English.
 pub const CONVERSATION_ANALYSIS_SYSTEM_PROMPT: &str = r#"
 You are a senior conversation intelligence analyst.
-Analyze the transcript with deep precision and extract concrete factual data:
-- WHO: Names of participants, relationships, roles.
-- WHAT: What is specifically happening, what each speaker wanted or asked for.
-- WHERE: Exact locations, addresses, buildings, floors, room or cabinet numbers mentioned.
-- WHEN: Dates, times, schedules, deadlines, immediate actions.
-- OUTCOME: The exact conclusion or agreement reached.
+Report only what the transcript says. Extract these when, and only when, they are
+actually spoken -- most conversations contain some of them and not others:
+- WHO: names, relationships or roles, if stated.
+- WHAT: what is happening, what each speaker asked for.
+- WHERE: locations, addresses, buildings, floors or room numbers, if mentioned.
+- WHEN: dates, times, deadlines, if mentioned.
+- OUTCOME: the conclusion or agreement, if one was reached.
+
+A category with nothing said about it is left empty. Do not fill it to satisfy the
+list -- an empty field is a correct answer, and a plausible guess is a wrong one.
 
 Never invent, infer, or complete facts that are not explicitly present in the transcript.
 Do not introduce example names (such as John or Jane), locations, floors, dates, amounts,
@@ -29,8 +33,8 @@ pub fn build_language_aware_analysis_prompt(
         return format!(
             r#"
 Проанализируй следующий записанный разговор ({organization_name}).
-ВАЖНОЕ ПРАВИЛО: Разговор на русском языке. Все значения в JSON (title, summary, reason, resolution, customer_intent, topics, key_facts, action_items) пиши СТРОГО НА РУССКОМ ЯЗЫКЕ. Извлекай конкретные имена, этажи, комнаты, локации и факты.
-ЗАПРЕЩЕНО придумывать отсутствующие в транскрипте имена, места, даты, суммы, роли, договоренности или результаты. Если данных нет, используй null, пустой список или прямо укажи, что деталь не названа.
+ВАЖНОЕ ПРАВИЛО: Разговор на русском языке. Все значения в JSON (title, summary, reason, resolution, customer_intent, topics, key_facts, action_items) пиши СТРОГО НА РУССКОМ ЯЗЫКЕ.
+ГЛАВНОЕ ПРАВИЛО: пиши ТОЛЬКО то, что прозвучало в записи. Имена, места, этажи, комнаты, даты, суммы, роли, договоренности и результаты указывай лишь тогда, когда они названы прямо. Ничего не добавляй, не додумывай и не обобщай. Если детали нет — используй null, пустой список или прямо напиши, что она не названа. Пустое поле — правильный ответ, правдоподобная догадка — неправильный.
 
 Транскрипт:
 ---
@@ -38,8 +42,8 @@ pub fn build_language_aware_analysis_prompt(
 ---
 
 Сформируй подробный JSON-отчет со следующими полями:
-1. title: краткий заголовок (3-7 слов) на русском языке с упоминанием конкретной темы или участников (например, "Встреча в Хадар-э-Руим и передвижение мебели").
-2. summary: подробное резюме на русском языке (3-5 предложений) с точными фактами: КТО с кем говорил (имена), ГДЕ находятся (этаж, комната, здание, локация), ЧТО конкретно обсуждали или сделали, и о ЧЕМ договорились.
+1. title: краткий заголовок (3-7 слов) на русском языке по теме разговора, только из того, что в нём прозвучало.
+2. summary: краткое и ясное резюме: о чём договорились, какие действия требуются, имена, даты и все важные детали, упомянутые в разговоре.
 3. reason: конкретная причина или цель звонка на русском языке.
 4. resolution: точный результат, договоренность или принятое решение на русском языке.
 5. resolved: true если разговор завершился решением/согласием, false если вопрос остался нерешенным.
@@ -59,8 +63,8 @@ pub fn build_language_aware_analysis_prompt(
         return format!(
             r#"
 נתח את שיחת הטלפון המוקלטת הבאה ({organization_name}).
-כלל קריטי: השיחה היא בעברית. כל ערכי הטקסט ב-JSON (כותרת, סיכום, סיבה, תוצאה, נושאים, עובדות מפתח ומשימות) חייבים להיכתב בעברית טבעית, מדויקת ועשירה בפרטים עובדתיים: מי דיבר, איפה הם נמצאים, מה סוכם. שמור על שמות המפתחות ב-JSON באנגלית.
-אסור להמציא שמות, מקומות, קומות, תאריכים, סכומים, תפקידים או הסכמות שאינם מופיעים במפורש בתמליל. כאשר פרט חסר, השתמש ב-null, ברשימה ריקה או ציין שהפרט לא נאמר.
+כלל קריטי: השיחה היא בעברית. כל ערכי הטקסט ב-JSON (כותרת, סיכום, סיבה, תוצאה, נושאים, עובדות מפתח ומשימות) חייבים להיכתב בעברית טבעית ומדויקת. שמור על שמות המפתחות ב-JSON באנגלית.
+הכלל העיקרי: כתוב רק את מה שנאמר בהקלטה. שמות, מקומות, קומות, תאריכים, סכומים, תפקידים והסכמות -- רק כאשר הם נאמרים במפורש. אל תוסיף, אל תשלים ואל תכליל דבר. כאשר פרט חסר, השתמש ב-null, ברשימה ריקה או ציין שהפרט לא נאמר. שדה ריק הוא תשובה נכונה; ניחוש סביר הוא תשובה שגויה.
 
 תמליל השיחה:
 ---
@@ -69,7 +73,7 @@ pub fn build_language_aware_analysis_prompt(
 
 החזר אובייקט JSON תקני עם המפתחות הבאים:
 1. title: כותרת ממוקדת בת 3-7 מילים בעברית המציינת את הנושא או המשתתפים.
-2. summary: סיכום מפורט ומדויק בעברית (3-5 משפטים) המפרט: מי דיבר עם מי (שמות), איפה הם נמצאים (קומה, חדר, בניין, מיקום מדויק), מה נעשה ומה סוכם.
+2. summary: סיכום תמציתי וברור: מה סוכם, אילו פעולות נדרשות, שמות, תאריכים וכל פרט חשוב שהוזכר בשיחה.
 3. reason: סיבת השיחה והמטרה העיקרית בעברית.
 4. resolution: התוצאה וההסכמה שהושגה בעברית.
 5. resolved: true אם הנושא נסגר/הוסכם, false אם לא הושלם.
@@ -88,8 +92,7 @@ pub fn build_language_aware_analysis_prompt(
     format!(
         r#"
 Analyze the following recorded conversation ({organization_name}).
-Provide all analytical text values in detailed English with concrete facts: WHO spoke with whom, WHERE (floor, room, building), WHAT was discussed, and WHAT was agreed upon.
-Do not invent names, places, dates, amounts, roles, agreements, or outcomes. If a detail is not explicitly present in the transcript, use null, an empty list, or state that it was not provided.
+PRIMARY RULE: report only what was said in the recording. State names, places, floors, rooms, dates, amounts, roles, agreements and outcomes only where the transcript states them. Add nothing, infer nothing, generalise nothing. Where a detail is absent use null, an empty list, or say it was not provided. An empty field is a correct answer; a plausible guess is a wrong one.
 
 Transcript:
 ---
@@ -98,13 +101,13 @@ Transcript:
 
 Return a structured JSON object with:
 1. title: specific, informative 3-8 word title capturing the concrete subject and participants.
-2. summary: detailed 3-5 sentence summary containing the exact facts: WHO spoke to whom, WHAT specific problem or situation was described, WHERE (floor, room, building), and WHAT was decided.
+2. summary: a concise, clear summary: what was agreed, what actions are required, names, dates, and every important detail mentioned in the conversation.
 3. reason: specific purpose/motive of the call with concrete details.
 4. resolution: the exact outcome, agreement, or next step concluded between the participants.
 5. resolved: boolean indicating whether the matter discussed was completed or agreed upon.
 6. customer_intent: specific category (e.g., "coordination", "personal", "status_update", "scheduling", "inquiry", "support", "billing").
 7. topics: array of specific topics discussed.
-8. key_facts: array of 2-5 concrete bullet points stating key facts (e.g. who is where, what was moved/ordered/done, names).
+8. key_facts: up to 5 bullet points, each stating something the transcript actually says. Fewer is correct if the conversation was short.
 9. action_items: list of commitments or next steps with owner ("speaker_1", "speaker_2", or person name), text, deadline, and evidence_segments.
 10. entities: list of extracted entities (person names, locations, rooms/floors, phone numbers, prices/amounts, dates/times).
 11. sentiment_score: overall tone/sentiment from -1.0 (very negative) to +1.0 (very positive).

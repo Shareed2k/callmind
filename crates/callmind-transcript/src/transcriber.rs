@@ -70,6 +70,7 @@ impl AudioTranscriber {
         explicit_language_hint: Option<Language>,
         channel_mapping: Option<&callmind_core::ChannelMapping>,
         vocabulary: &[crate::vocabulary::VocabularyEntry],
+        expected_speakers: Option<usize>,
     ) -> Result<Transcript, TranscriberError> {
         // 1. Channel Analysis & Resampling
         let channel_mode = ChannelAnalyzer::analyze(decoded_audio);
@@ -105,11 +106,19 @@ impl AudioTranscriber {
                     })
                     .await
                     .map_err(|e| TranscriberError::Diarization(e.to_string())),
+                // The count comes from whoever ingested the audio, because that
+                // is the only place it is actually known: a voice note is one
+                // person by construction, a phone recording is two. Hardcoding
+                // `Some(2)` here split every single-speaker recording in half,
+                // and no acoustic threshold can tell the two cases apart --
+                // measured in `tests/onnx_centroid_probe.rs`, where the centroid
+                // gap for two real speakers runs as low as 0.104 while one voice
+                // forced apart reaches 0.394.
                 _ => self
                     .clustering_diarizer
                     .diarize(DiarizationRequest {
                         audio: &resampled_mono,
-                        expected_speakers: Some(2),
+                        expected_speakers,
                     })
                     .await
                     .map_err(|e| TranscriberError::Diarization(e.to_string())),

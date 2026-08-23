@@ -25,20 +25,43 @@ pub enum AnalysisError {
     EmptyTranscript,
 }
 
+/// The analysis shape the prompt asks the model for.
+///
+/// Every scalar field goes through [`crate::lenient`] rather than serde's strict
+/// deserialization. A local model slips on a type now and then -- a list of
+/// bullet points where the schema says string, `"0.8"` where it says number --
+/// and because this is one struct, one such slip used to discard every other
+/// field the model got right and fall back to the regex summarizer. The
+/// `Value`-typed fields below were already coerced by hand where they are used,
+/// so this makes the whole struct consistently forgiving instead of leaving the
+/// scalars as the one strict thing in it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LlmRawAnalysis {
+    #[serde(default, deserialize_with = "crate::lenient::string")]
     title: Option<String>,
+    #[serde(default, deserialize_with = "crate::lenient::string")]
     summary: Option<String>,
+    #[serde(default, deserialize_with = "crate::lenient::string")]
     reason: Option<String>,
+    #[serde(default, deserialize_with = "crate::lenient::string")]
     resolution: Option<String>,
+    #[serde(default, deserialize_with = "crate::lenient::boolean")]
     resolved: Option<bool>,
+    #[serde(default, deserialize_with = "crate::lenient::string")]
     customer_intent: Option<String>,
+    #[serde(default)]
     topics: Option<serde_json::Value>,
+    #[serde(default)]
     key_facts: Option<serde_json::Value>,
+    #[serde(default)]
     action_items: Option<serde_json::Value>,
+    #[serde(default)]
     entities: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "crate::lenient::number")]
     sentiment_score: Option<f32>,
+    #[serde(default)]
     scorecard: Option<serde_json::Value>,
+    #[serde(default)]
     compliance: Option<serde_json::Value>,
 }
 
@@ -106,9 +129,24 @@ impl AnalysisEngine {
                 "Transcript is too short for reliable generative analysis".into(),
             ))
         } else {
-            self.llm
-                .generate_structured(&prompt, Some(CONVERSATION_ANALYSIS_SYSTEM_PROMPT))
+            // Fetched and parsed in two steps rather than through
+            // `generate_structured`, so a rejection can report *which* field was
+            // the wrong shape. Serde names the type it wanted and not the field,
+            // which is the one thing needed to fix the prompt.
+            match self
+                .llm
+                .generate_json(&prompt, Some(CONVERSATION_ANALYSIS_SYSTEM_PROMPT))
                 .await
+            {
+                Ok(value) => serde_json::from_value(value.clone()).map_err(|e| {
+                    tracing::warn!(
+                        shape = %crate::lenient::describe_shape(&value),
+                        "LLM analysis JSON did not fit the schema"
+                    );
+                    LlmError::JsonParse(e)
+                }),
+                Err(e) => Err(e),
+            }
         };
 
         let (

@@ -14,7 +14,6 @@ callmind-db.workspace = true
 callmind-transcript.workspace = true
 callmind-analysis.workspace = true
 callmind-llm.workspace = true
-sqlx.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 chrono.workspace = true

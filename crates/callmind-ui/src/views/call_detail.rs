@@ -4,6 +4,15 @@ use callmind_core::Call;
 use callmind_transcript::{TextDirection, Transcript};
 use std::fmt::Write;
 
+/// Escape untrusted text for use inside a double-quoted HTML attribute.
+///
+/// The to-do payload is read back in JS via `this.dataset.todo`, so it must
+/// never be able to close the attribute. `encode_text` is *not* sufficient
+/// here: it escapes `&`, `<` and `>` but leaves `"` intact.
+fn escape_attribute(raw: &str) -> String {
+    html_escape::encode_double_quoted_attribute(raw).into_owned()
+}
+
 /// Render the Call Detail view HTML.
 #[must_use]
 pub fn render_call_detail(
@@ -11,6 +20,10 @@ pub fn render_call_detail(
     transcript: Option<&Transcript>,
     analysis: Option<&CallAnalysis>,
     last_error: Option<&str>,
+    // Stored plugin results as `(plugin, payload_json)`. Rendered through the
+    // template registry, so a plugin can supply its own view.
+    plugin_results: &[(String, String)],
+    templates: &crate::templates::TemplateRegistry,
 ) -> String {
     let call_id = call.id;
     let title = analysis.map_or_else(|| "Call Detail".to_string(), |a| a.title.clone());
@@ -134,7 +147,7 @@ pub fn render_call_detail(
                 for item in &a.action_items {
                     let _ = writeln!(todo_raw, "- [ ] {}", item.text);
                 }
-                let escaped_todo_js = html_escape::encode_text(&todo_raw);
+                let escaped_todo_attr = escape_attribute(&todo_raw);
                 let encoded_whatsapp = urlencoding_simple(&format!("*To-Do List ({})*:\n{}", a.title, todo_raw));
 
                 let _ = write!(
@@ -144,7 +157,7 @@ pub fn render_call_detail(
                       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 0.75rem; flex-wrap:wrap; gap:0.5rem;">
                         <h3 style="font-size: 0.9rem; color: var(--text-secondary); text-transform: uppercase; margin:0;">📝 Smart To-Do & Grocery List</h3>
                         <div style="display:flex; gap:0.35rem;">
-                          <button onclick="navigator.clipboard.writeText('{escaped_todo_js}'); showToast('📋 Tasks copied to clipboard!');" style="background:rgba(255,255,255,0.08); border:1px solid var(--border-color); color:white; padding:0.25rem 0.6rem; border-radius:0.25rem; font-size:0.75rem; cursor:pointer;" title="Copy as Markdown / Apple Reminders">📋 Copy Tasks</button>
+                          <button data-todo="{escaped_todo_attr}" onclick="navigator.clipboard.writeText(this.dataset.todo); showToast('📋 Tasks copied to clipboard!');" style="background:rgba(255,255,255,0.08); border:1px solid var(--border-color); color:white; padding:0.25rem 0.6rem; border-radius:0.25rem; font-size:0.75rem; cursor:pointer;" title="Copy as Markdown / Apple Reminders">📋 Copy Tasks</button>
                           <a href="https://api.whatsapp.com/send?text={encoded_whatsapp}" target="_blank" style="background:rgba(37,211,102,0.15); border:1px solid rgba(37,211,102,0.3); color:#86efac; padding:0.25rem 0.6rem; border-radius:0.25rem; font-size:0.75rem; text-decoration:none; font-weight:600; display:inline-flex; align-items:center; gap:0.25rem;">💬 WhatsApp</a>
                         </div>
                       </div>
@@ -272,6 +285,45 @@ pub fn render_call_detail(
 
     let escaped_title = html_escape::encode_text(&title);
 
+    // Emotional tone. The core computes a lexicon-based distribution from the
+    // transcript text and has stored it all along without ever showing it.
+    let emotions_html = analysis
+        .and_then(|a| a.emotions.as_ref())
+        .map(|e| {
+            let mut scores = vec![
+                ("Anger", e.anger),
+                ("Fear", e.fear),
+                ("Joy", e.joy),
+                ("Surprise", e.surprise),
+                ("Sadness", e.sadness),
+                ("Disgust", e.disgust),
+                ("Anticipation", e.anticipation),
+                ("Trust", e.trust),
+                ("Neutral", e.neutral),
+            ];
+            scores.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+            let context = serde_json::json!({
+                "dominant": format!("{:?}", e.dominant_emotion),
+                "scores": scores
+                    .iter()
+                    .filter(|(_, v)| *v > 0.0)
+                    .map(|(label, value)| serde_json::json!({
+                        "label": label,
+                        "percent": (value * 100.0).round() as i64,
+                    }))
+                    .collect::<Vec<_>>(),
+            });
+            templates.render("emotions", &context).unwrap_or_else(|e| {
+                tracing::warn!("Emotion view failed to render: {e}");
+                String::new()
+            })
+        })
+        .unwrap_or_default();
+
+    // Anything a plugin contributed, such as acoustic per-speaker emotion.
+    let plugin_html = templates.render_all_plugins(plugin_results);
+
     let body = format!(
         r#"
         <div style="margin-bottom: 1.5rem; display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:1rem;">
@@ -299,6 +351,15 @@ pub fn render_call_detail(
                 <option value="he">🇮🇱 Hebrew (ivrit-ai)</option>
                 <option value="ru">🇷🇺 Russian (Русский)</option>
                 <option value="en">🇬🇧 English</option>
+              </select>
+              <select id="reprocess-speakers-select" style="font-size:0.8rem; background:var(--bg-card); border:1px solid var(--border-color); color:white; padding:0.35rem 0.5rem; border-radius:0.25rem; cursor:pointer;" title="How many people are on this recording. The count cannot be recovered reliably from the audio, so a wrong split is corrected here.">
+                <option value="">👥 Speakers: default</option>
+                <option value="1">👤 1 (voice note / monologue)</option>
+                <option value="2">👥 2 (phone call)</option>
+                <option value="3">👥 3</option>
+                <option value="4">👥 4</option>
+                <option value="5">👥 5</option>
+                <option value="6">👥 6</option>
               </select>
               <button id="reprocess-btn" onclick="reprocessCall()" style="font-size:0.8rem; background:rgba(245,158,11,0.15); border:1px solid rgba(245,158,11,0.3); color:#fbbf24; padding:0.35rem 0.65rem; border-radius:0.25rem; cursor:pointer; font-weight:600; display:inline-flex; align-items:center; gap:0.25rem;" title="Re-run AI transcription & analysis">
                 <span>🔄 Re-analyze</span>
@@ -335,15 +396,22 @@ pub fn render_call_detail(
             </div>
             <div style="display:flex; align-items:center; gap:0.5rem;">
               <span style="font-size:0.75rem; color:var(--text-muted);">Hotkeys: Space (Play/Pause), ←/→ (±5s), [/] (Speed), M (Mute)</span>
-              <a href="/api/v1/calls/{call_id}/recording?format=wav" download style="display:inline-flex; align-items:center; gap:0.3rem; font-size:0.85rem; color:var(--accent-blue); background:rgba(59,130,246,0.1); border:1px solid rgba(59,130,246,0.3); padding:0.35rem 0.75rem; border-radius:0.25rem;">
+              <a href="/api/v1/calls/{call_id}/recording" download style="display:inline-flex; align-items:center; gap:0.3rem; font-size:0.85rem; color:var(--accent-blue); background:rgba(59,130,246,0.1); border:1px solid rgba(59,130,246,0.3); padding:0.35rem 0.75rem; border-radius:0.25rem;">
                 <span>⬇ Download Audio (.wav)</span>
               </a>
             </div>
           </div>
-          <audio id="call-audio" controls preload="auto" style="width: 100%; border-radius: 0.25rem;">
-            <source src="/api/v1/calls/{call_id}/recording?format=wav" type="audio/wav">
+          <!-- Order matters: the browser picks the first source it can play, and
+               every browser can play WAV. With the WAV transcode listed first it
+               was always chosen, so the native sources below were dead and every
+               play and every seek re-transcoded the whole file. Native first,
+               transcode only as a fallback (Safari cannot play OGG/Opus).
+               `preload="metadata"` keeps it from fetching audio before play. -->
+          <audio id="call-audio" controls preload="metadata" style="width: 100%; border-radius: 0.25rem;">
             <source src="/api/v1/calls/{call_id}/recording" type="audio/mp4">
+            <source src="/api/v1/calls/{call_id}/recording" type="audio/ogg">
             <source src="/api/v1/calls/{call_id}/recording">
+            <source src="/api/v1/calls/{call_id}/recording?format=wav" type="audio/wav">
             Your browser does not support the audio element.
           </audio>
           <div id="audio-error-msg" style="display:none; background:rgba(239,68,68,0.15); border:1px solid var(--accent-red); color:#fca5a5; padding:0.5rem 0.75rem; border-radius:0.25rem; font-size:0.85rem;">
@@ -355,6 +423,8 @@ pub fn render_call_detail(
           <!-- Left Summary Card -->
           <div class="card">
             {summary_html}
+            {emotions_html}
+            {plugin_html}
           </div>
 
           <!-- Right Transcript Column -->
@@ -492,12 +562,19 @@ pub fn render_call_detail(
           async function reprocessCall() {{
             const langSelect = document.getElementById('reprocess-lang-select');
             const lang = langSelect ? langSelect.value : 'auto';
-            if (!confirm(`Re-run transcription & AI analysis with selected language mode (${{lang}})?`)) return;
+            const speakersSelect = document.getElementById('reprocess-speakers-select');
+            const speakers = speakersSelect ? speakersSelect.value : '';
+            const speakerNote = speakers ? `, ${{speakers}} speaker(s)` : '';
+            if (!confirm(`Re-run transcription & AI analysis (language: ${{lang}}${{speakerNote}})?`)) return;
             const btn = document.getElementById('reprocess-btn');
             btn.disabled = true;
             btn.innerText = '⏳ Queuing...';
             try {{
-              const res = await fetch(`/api/v1/calls/${{callId}}/reprocess?language=${{lang}}`, {{ method: 'POST' }});
+              // The speaker count is only sent when chosen, so leaving the
+              // selector alone keeps whatever the pipeline decides by default.
+              const params = new URLSearchParams({{ language: lang }});
+              if (speakers) params.set('speakers', speakers);
+              const res = await fetch(`/api/v1/calls/${{callId}}/reprocess?${{params}}`, {{ method: 'POST' }});
               if (res.ok) {{
                 btn.innerText = '✓ Queued!';
                 setTimeout(() => window.location.reload(), 2500);
@@ -588,4 +665,31 @@ fn urlencoding_simple(s: &str) -> String {
         }
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_attribute;
+
+    #[test]
+    fn attribute_escaping_cannot_break_out() {
+        // The `"` used to close the attribute; the `'` used to terminate the JS
+        // string literal this payload was previously spliced into.
+        let hostile =
+            "- [ ] buy Dana's keys \" onmouseover=alert(1) x=\"\n- [ ] <script>alert(2)</script>";
+        let escaped = escape_attribute(hostile);
+
+        assert!(
+            !escaped.contains('"'),
+            "an unescaped quote can close the attribute: {escaped}"
+        );
+        assert!(
+            !escaped.contains('<'),
+            "an unescaped '<' can open a tag: {escaped}"
+        );
+        assert!(escaped.contains("&quot;"), "quote must be entity-encoded");
+        // An apostrophe is harmless inside a double-quoted attribute and must
+        // survive verbatim so the copied markdown is not mangled.
+        assert!(escaped.contains("Dana's"), "apostrophe must round-trip");
+    }
 }

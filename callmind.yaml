@@ -5,9 +5,15 @@ server:
   body_limit_mb: 500
 
 database:
+  # "sqlite" or "postgres". One set of repositories serves both -- the queries are
+  # built by sea-query and the migration is one definition, so switching backends
+  # changes this line and nothing else.
+  #   sqlite:   ./data/callmind.db
+  #   postgres: postgres://user:password@host:5432/callmind
   driver: "sqlite"
   url: "./data/callmind.db"
   max_connections: 16
+  # SQLite only. ponytail: not wired -- pool.rs hardcodes 5 s.
   busy_timeout_ms: 5000
 
 storage:
@@ -24,6 +30,11 @@ models:
   # Base directory for AI models:
   # - STT: ./models/stt/ivrit-ai-large-v3-turbo.bin, ./models/stt/whisper-large-v3.bin
   # - Diarization ONNX: ./models/diarization/speaker_embedding.onnx (PyAnnote, ECAPA-TDNN, or WeSpeaker)
+  # - Speaker segmentation (optional): ./models/diarization/segmentation.onnx
+  #   With it, the number of speakers is measured from the audio; without it a
+  #   two-party call is assumed. Produce it with
+  #   `python3 scripts/export_pyannote_segmentation.py --out models/diarization/segmentation.onnx`
+  #   -- the published export cannot be loaded by a pure-Rust runtime as-is.
   models_dir: "./models"
 
 llm:
@@ -45,11 +56,16 @@ bots:
     bot_token: null # e.g. "123456789:ABCdefGhIJKlmNoPQRstuVWXyz" or set CALLMIND_TELEGRAM_BOT_TOKEN
     allowed_chat_ids: [] # optional: restrict to specific family/user chat IDs
 
-  whatsapp:
+  # Self-hosted Evolution API (https://evolution-api.com) — pairs with an
+  # ordinary WhatsApp account over QR, no Meta business verification needed.
+  evolution:
     enabled: false
-    phone_number_id: null # e.g. Meta Cloud API Phone Number ID
-    access_token: null # Meta Graph API Access Token
-    verify_token: null # Webhook challenge verification token
+    base_url: null # e.g. "http://localhost:8080" or set CALLMIND_EVOLUTION_BASE_URL
+    instance: null # instance name created in Evolution API
+    api_key: null # value for the `apikey` header, or set CALLMIND_EVOLUTION_API_KEY
+    webhook_token: null # shared secret required on the inbound webhook
+    allowed_numbers: [] # optional: restrict to specific senders, digits only
+    result_timeout_secs: 600
 
   slack:
     enabled: false

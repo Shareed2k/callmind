@@ -1,0 +1,28 @@
+# Backing services for the integration tests.
+#
+#   docker compose -f docker-compose.test.yml up -d
+#   CALLMIND_TEST_POSTGRES_URL=postgres://callmind:callmind@127.0.0.1:55432/callmind_test \
+#     cargo test --workspace
+#   docker compose -f docker-compose.test.yml down -v
+#
+# Without the variable the Postgres tests skip, so the default `cargo test` needs
+# nothing running.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: callmind
+      POSTGRES_PASSWORD: callmind
+      POSTGRES_DB: callmind_test
+    ports:
+      # Deliberately not 5432, so it cannot collide with a local Postgres.
+      - "55432:5432"
+    # Throwaway data: keeping it in memory makes the suite faster and leaves
+    # nothing behind.
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U callmind -d callmind_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 15

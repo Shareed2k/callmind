@@ -1,3 +1,13 @@
+//! Speaker diarization: who spoke when.
+//!
+//! Two paths. Stereo telephony is split by channel. Everything else extracts
+//! neural speaker embeddings with `tract-onnx` and clusters them with complete-linkage
+//! agglomerative clustering, falling back to acoustic DSP features when no ONNX
+//! model is present.
+//!
+//! Clustering uses `kodama`'s nn-chain implementation: the naive
+//! recompute-every-merge approach is cubic and did not finish a one-hour call.
+
 pub mod ahc;
 pub mod aligner;
 pub mod clustering;
@@ -7,6 +17,8 @@ pub mod features;
 pub mod models;
 pub mod neural;
 pub mod onnx_extractor;
+pub mod pyannote;
+pub mod spectral;
 pub mod stereo;
 pub mod traits;
 

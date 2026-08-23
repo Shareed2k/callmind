@@ -1,13 +1,24 @@
 use crate::errors::DiarizationError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::info;
 use tract_onnx::prelude::*;
+
+/// What the loaded model expects as input, resolved once at load time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelInput {
+    /// Raw waveform, `[1, samples]`.
+    Waveform,
+    /// 80-channel log Mel filterbank frames, `[1, frames, 80]`.
+    Fbank,
+}
 
 /// Neural Speaker Embedding Extractor using pure-Rust ONNX inference (`tract-onnx`).
 /// Compatible with ECAPA-TDNN, PyAnnote embedding, and WeSpeaker ResNet models.
 pub struct OnnxSpeakerEmbeddingExtractor {
     model_path: PathBuf,
     plan: Arc<TypedRunnableModel>,
+    input_kind: ModelInput,
 }
 
 impl OnnxSpeakerEmbeddingExtractor {
@@ -41,9 +52,32 @@ impl OnnxSpeakerEmbeddingExtractor {
                 DiarizationError::Inference(format!("Failed to build runnable plan: {e}"))
             })?;
 
+        // Resolve the input layout once from the model's own declared fact
+        // instead of probing per call. This used to try a raw-waveform tensor
+        // first and fall back to FBank on error, so a model declaring
+        // `[B, T, 80]` — WeSpeaker and ECAPA-TDNN both do — paid a doomed
+        // `plan.run()` on every single window, thousands of them per call.
+        let input_kind = match model.model().input_fact(0) {
+            Ok(fact) if fact.rank() == 3 => ModelInput::Fbank,
+            Ok(fact) if fact.rank() == 2 => ModelInput::Waveform,
+            Ok(fact) => {
+                info!(
+                    "ONNX model input rank {} is unrecognised; assuming FBank features",
+                    fact.rank()
+                );
+                ModelInput::Fbank
+            }
+            Err(e) => {
+                info!("Could not read ONNX input fact ({e}); assuming FBank features");
+                ModelInput::Fbank
+            }
+        };
+        info!("ONNX speaker embedding model expects {input_kind:?} input");
+
         Ok(Self {
             model_path: path_buf,
             plan: model,
+            input_kind,
         })
     }
 
@@ -53,18 +87,21 @@ impl OnnxSpeakerEmbeddingExtractor {
             return Err(DiarizationError::EmptyAudio);
         }
 
-        // 1. Try standard raw waveform [1, samples]
-        let wave_tensor: Tensor =
-            tract_ndarray::Array2::from_shape_vec((1, samples.len()), samples.to_vec())
-                .map_err(|e| {
-                    DiarizationError::Inference(format!("Failed to create input tensor shape: {e}"))
+        let output = match self.input_kind {
+            ModelInput::Waveform => {
+                let wave_tensor: Tensor =
+                    tract_ndarray::Array2::from_shape_vec((1, samples.len()), samples.to_vec())
+                        .map_err(|e| {
+                            DiarizationError::Inference(format!(
+                                "Failed to create input tensor shape: {e}"
+                            ))
+                        })?
+                        .into();
+                self.plan.run(tvec!(wave_tensor.into())).map_err(|e| {
+                    DiarizationError::Inference(format!("ONNX inference error: {e}"))
                 })?
-                .into();
-
-        let output = match self.plan.run(tvec!(wave_tensor.into())) {
-            Ok(out) => out,
-            Err(_) => {
-                // 2. Try 80-dim log Mel filterbank frames [1, frames, 80] for models requiring FBank features
+            }
+            ModelInput::Fbank => {
                 let fbank =
                     crate::features::AcousticFeatureExtractor::compute_fbank_80(samples, 16000);
                 if fbank.is_empty() {
@@ -82,7 +119,6 @@ impl OnnxSpeakerEmbeddingExtractor {
                             ))
                         })?
                         .into();
-
                 self.plan.run(tvec!(fbank_tensor.into())).map_err(|e| {
                     DiarizationError::Inference(format!("ONNX inference error: {e}"))
                 })?

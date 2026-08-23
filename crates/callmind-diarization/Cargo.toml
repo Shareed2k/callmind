@@ -20,3 +20,7 @@ serde.workspace = true
 utoipa.workspace = true
 tokio.workspace = true
 tract-onnx = "0.23.5"
+kodama = "0.3.0"
+realfft = "3.5.0"
+
+[dev-dependencies]

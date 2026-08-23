@@ -45,6 +45,8 @@ impl DiarizationEngine for ClusteringDiarizer {
             return Ok(DiarizationResult::new(1, Vec::new()));
         }
 
+        // Honoured exactly when supplied -- see `NeuralDiarizer` for why the
+        // count cannot be recovered from the audio.
         let k = request.expected_speakers.unwrap_or(2).clamp(1, 4);
 
         if regions.len() == 1 || k == 1 {
@@ -101,7 +103,13 @@ impl DiarizationEngine for ClusteringDiarizer {
             return Ok(DiarizationResult::new(1, Vec::new()));
         }
 
-        // 2. Perform Agglomerative Hierarchical Clustering (AHC)
+        // 2. Perform Agglomerative Hierarchical Clustering (AHC).
+        //
+        // These are the hand-rolled acoustic features rather than the ONNX
+        // embeddings, and their distances live on a different scale entirely
+        // (measured: 0.000 to 0.036 between clearly different pitches), so the
+        // threshold cannot be shared with the neural path. It stays a forced
+        // count here; this is the no-model fallback.
         let ahc = AgglomerativeClustering::new(0.35, Some(k));
         let assignments = ahc.cluster(&sub_embeddings);
 

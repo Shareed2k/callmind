@@ -86,9 +86,13 @@ impl BatchImporter {
                 continue;
             }
 
-            // Decode metadata using Symphonia
-            let decoded = match AudioDecoder::decode_file(&file_path) {
-                Ok(d) => d,
+            // Read duration/channels/rate from the container headers. Decoding
+            // the whole file for this materialised every sample in memory —
+            // hundreds of megabytes per long recording, for three numbers.
+            let metadata = match AudioDecoder::read_metadata(&file_path) {
+                Ok(Some(meta)) => Some(meta),
+                // Header did not declare a frame count; fall back below.
+                Ok(None) => None,
                 Err(e) => {
                     tracing::warn!(
                         "Skipping corrupt or unreadable audio file {:?}: {e}",
@@ -99,9 +103,17 @@ impl BatchImporter {
                 }
             };
 
-            let duration_ms = decoded.duration_ms();
-            let channels = decoded.channels;
-            let sample_rate = decoded.sample_rate;
+            let (duration_ms, channels, sample_rate) = match metadata {
+                Some(meta) => (meta.duration_ms, meta.channels, meta.sample_rate),
+                None => match AudioDecoder::decode_file(&file_path) {
+                    Ok(decoded) => (decoded.duration_ms(), decoded.channels, decoded.sample_rate),
+                    Err(e) => {
+                        tracing::warn!("Skipping unreadable audio file {:?}: {e}", file_path);
+                        summary.failed_files += 1;
+                        continue;
+                    }
+                },
+            };
 
             if channels == 1 {
                 summary.mono_calls += 1;

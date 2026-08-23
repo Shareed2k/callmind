@@ -16,6 +16,7 @@ members = [
     "crates/callmind-analysis",
     "crates/callmind-search",
     "crates/callmind-ui",
+    "crates/callmind-worker-proto",
     "crates/callmind-api",
     "crates/callmind",
 ]
@@ -23,7 +24,11 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# Was 1.85 -- the edition 2024 floor -- until sea-orm 2.0 and sqlx 0.9 arrived.
+# `sqlx-sqlite 0.9` alone requires 1.94, so 1.85 stopped being reachable rather
+# than being given up. Verified against every locked dependency's declared
+# `rust-version`, not guessed.
+rust-version = "1.94"
 authors = ["CallMind Team"]
 license = "MIT OR Apache-2.0"
 
@@ -82,9 +87,11 @@ callmind-analysis = { path = "crates/callmind-analysis" }
 callmind-search = { path = "crates/callmind-search" }
 callmind-ui = { path = "crates/callmind-ui" }
 callmind-api = { path = "crates/callmind-api" }
+callmind-worker-proto = { path = "crates/callmind-worker-proto" }
 
 tokio = { version = "1.43", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt", "io"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 axum = { version = "0.8", features = ["multipart", "macros"] }
 tower = { version = "0.5", features = ["util", "timeout"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "limit"] }
@@ -97,7 +104,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid", "migrate"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "postgres", "chrono", "uuid", "migrate"] }
+sea-orm = { version = "2.0", default-features = false, features = ["runtime-tokio-rustls", "sqlx-sqlite", "sqlx-postgres", "macros"] }
+sea-orm-migration = { version = "2.0", default-features = false, features = ["runtime-tokio-rustls", "sqlx-sqlite", "sqlx-postgres"] }
 
 uuid = { version = "1.13", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -121,3 +130,9 @@ async-trait = "0.1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 html-escape = "0.2"
 whatlang = "0.16"
+
+minijinja = { version = "2.24", features = ["loader"] }
+prost = "0.14"
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"

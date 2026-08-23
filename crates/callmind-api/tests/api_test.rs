@@ -4,7 +4,10 @@ use callmind_analysis::AnalysisEngine;
 use callmind_api::{AppState, create_router};
 use callmind_config::AppConfig;
 use callmind_core::{Call, CreateCallRequest};
-use callmind_db::{SqliteCallRepository, SqliteJobRepository, create_sqlite_pool, run_migrations};
+use callmind_db::{
+    SqlCallRepository, SqlJobRepository, SqlSearchIndex, SqlStatsRepository, create_sqlite_pool,
+    orm_connection, run_migrations,
+};
 use callmind_llm::MockLlmEngine;
 use callmind_search::{AskEngine, SearchEngine};
 use callmind_storage::FilesystemStorage;
@@ -14,18 +17,25 @@ use tempfile::tempdir;
 use tower::ServiceExt;
 
 async fn setup_test_app() -> (axum::Router, tempfile::TempDir) {
+    setup_test_app_with_config(AppConfig::default()).await
+}
+
+async fn setup_test_app_with_config(config: AppConfig) -> (axum::Router, tempfile::TempDir) {
     let pool = create_sqlite_pool(":memory:", 5).await.unwrap();
     run_migrations(&pool).await.unwrap();
 
     let temp_dir = tempdir().unwrap();
     let storage = FilesystemStorage::new(temp_dir.path()).await.unwrap();
 
-    let call_repo = Arc::new(SqliteCallRepository::new(pool.clone()));
-    let job_repo = Arc::new(SqliteJobRepository::new(pool.clone()));
+    let call_repo = Arc::new(SqlCallRepository::new(orm_connection(&pool)));
+    let job_repo = Arc::new(SqlJobRepository::new(orm_connection(&pool)));
+    let stats_repo = Arc::new(SqlStatsRepository::new(orm_connection(&pool)));
     let storage_arc = Arc::new(storage);
-    let config = Arc::new(AppConfig::default());
+    let config = Arc::new(config);
 
-    let search_engine = Arc::new(SearchEngine::new(pool.clone()));
+    let search_engine = Arc::new(SearchEngine::new(Arc::new(SqlSearchIndex::new(
+        orm_connection(&pool),
+    ))));
     let mock_llm = Arc::new(MockLlmEngine::default());
     let ask_engine = Arc::new(AskEngine::new((*search_engine).clone(), mock_llm.clone()));
     let analysis_engine = Arc::new(AnalysisEngine::new(mock_llm));
@@ -34,11 +44,12 @@ async fn setup_test_app() -> (axum::Router, tempfile::TempDir) {
         config,
         call_repo,
         job_repo,
+        stats_repo,
         storage_arc,
         search_engine,
         ask_engine,
         analysis_engine,
-        pool,
+        Arc::new(callmind_ui::templates::TemplateRegistry::new()),
     );
     (create_router(state), temp_dir)
 }
@@ -237,4 +248,81 @@ fn test_bot_response_formatter_and_ics() {
     assert!(ics.contains("BEGIN:VCALENDAR"));
     assert!(ics.contains("LOCATION:ул. Ленина 45, каб. 12"));
     assert!(ics.contains("END:VCALENDAR"));
+}
+
+/// The UI routes used to sit outside the auth layer, so `auth.enabled = true`
+/// locked the API while leaving every transcript readable at `/calls`.
+#[tokio::test]
+async fn test_auth_covers_ui_and_api_routes() {
+    const KEY: &str = "test-secret-key";
+
+    let mut config = AppConfig::default();
+    config.auth.enabled = true;
+    config.auth.api_key = Some(KEY.to_string());
+    let (app, _dir) = setup_test_app_with_config(config).await;
+
+    let get = |uri: &str, auth: Option<(&str, &str)>| {
+        let mut builder = Request::builder().uri(uri.to_string());
+        if let Some((name, value)) = auth {
+            builder = builder.header(name, value.to_string());
+        }
+        let app = app.clone();
+        let req = builder.body(Body::empty()).unwrap();
+        async move { app.oneshot(req).await.unwrap() }
+    };
+
+    // Probes stay reachable without credentials.
+    assert_eq!(get("/health", None).await.status(), StatusCode::OK);
+    assert_eq!(get("/ready", None).await.status(), StatusCode::OK);
+
+    // Every data-bearing route rejects an anonymous request.
+    for uri in [
+        "/calls",
+        "/analytics",
+        "/ask",
+        "/api/v1/calls",
+        "/api-docs/openapi.json",
+    ] {
+        let res = get(uri, None).await;
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri} was not protected"
+        );
+        assert!(
+            res.headers().contains_key(header::WWW_AUTHENTICATE),
+            "{uri} must challenge the browser so the UI stays usable"
+        );
+    }
+
+    // A wrong key is still rejected.
+    assert_eq!(
+        get("/calls", Some(("X-API-Key", "wrong-key")))
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // All three credential forms are accepted. Basic is what lets a browser
+    // reach the HTML UI, which cannot set custom headers by navigation.
+    let basic = format!(
+        "Basic {}",
+        base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("callmind:{KEY}")
+        )
+    );
+    for auth in [
+        ("X-API-Key", KEY.to_string()),
+        (header::AUTHORIZATION.as_str(), format!("Bearer {KEY}")),
+        (header::AUTHORIZATION.as_str(), basic),
+    ] {
+        let res = get("/calls", Some((auth.0, &auth.1))).await;
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "credential {} rejected",
+            auth.1
+        );
+    }
 }

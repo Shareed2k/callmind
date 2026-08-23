@@ -7,9 +7,8 @@ use serde_json::Value;
 use sha2::Digest;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-
-const DEFAULT_ORG_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 /// Telegram Bot Listener for personal / family voice intelligence.
 pub struct TelegramBotService;
@@ -21,7 +20,7 @@ impl TelegramBotService {
         call_repo: Arc<dyn CallRepository>,
         job_repo: Arc<dyn JobRepository>,
         storage: Arc<dyn RecordingStorage>,
-        pool: sqlx::SqlitePool,
+        cancellation_token: CancellationToken,
     ) {
         if !config.bots.telegram.enabled {
             return;
@@ -42,70 +41,117 @@ impl TelegramBotService {
         tokio::spawn(async move {
             let client = reqwest::Client::new();
             let mut offset: i64 = 0;
+            let mut backoff = Duration::from_secs(1);
 
-            // Verify bot credentials
+            // Verify bot credentials. `without_url` matters: a reqwest error
+            // carries the request URL, and every Telegram URL embeds the bot
+            // token — logging it verbatim wrote the token to the log file.
             let get_me_url = format!("https://api.telegram.org/bot{token}/getMe");
             match client.get(&get_me_url).send().await {
                 Ok(resp) => {
-                    if let Ok(json) = resp.json::<Value>().await {
-                        let bot_name = json["result"]["username"].as_str().unwrap_or("CallMindBot");
-                        info!("Connected to Telegram Bot: @{bot_name}");
+                    let status = resp.status();
+                    let json = resp.json::<Value>().await.unwrap_or_default();
+                    // Telegram answers a bad token with a JSON body and
+                    // `ok: false`, so a successful parse proves nothing. Checking
+                    // only that the body parsed reported "Connected" for an
+                    // invalid token, with the username silently falling back to
+                    // a placeholder.
+                    if !status.is_success() || json["ok"].as_bool() != Some(true) {
+                        let description = json["description"].as_str().unwrap_or("unknown error");
+                        error!(
+                            "Telegram rejected the bot token ({status}): {description}. Not starting the Telegram listener."
+                        );
+                        return;
                     }
+                    let Some(bot_name) = json["result"]["username"].as_str() else {
+                        error!("Telegram getMe succeeded but returned no username");
+                        return;
+                    };
+                    info!("Connected to Telegram Bot: @{bot_name}");
                 }
                 Err(e) => {
-                    error!("Failed to connect to Telegram Bot API: {e}");
+                    error!("Failed to connect to Telegram Bot API: {}", e.without_url());
                     return;
                 }
             }
 
-            loop {
+            while !cancellation_token.is_cancelled() {
                 let updates_url = format!(
                     "https://api.telegram.org/bot{token}/getUpdates?offset={offset}&timeout=25"
                 );
-                match client.get(&updates_url).send().await {
+
+                let response = tokio::select! {
+                    () = cancellation_token.cancelled() => break,
+                    res = client.get(&updates_url).send() => res,
+                };
+
+                // Any non-success status (429 rate limit, 5xx) used to fall
+                // through the `if let Ok(json)` below and re-request instantly,
+                // turning a rate limit into a hot spin loop.
+                let payload = match response {
+                    Ok(resp) if resp.status().is_success() => resp.json::<Value>().await.ok(),
                     Ok(resp) => {
-                        if let Ok(json) = resp.json::<Value>().await {
-                            if let Some(updates) = json["result"].as_array() {
-                                for update in updates {
-                                    if let Some(update_id) = update["update_id"].as_i64() {
-                                        offset = update_id + 1;
-                                    }
-
-                                    let client_clone = client.clone();
-                                    let token_clone = token.clone();
-                                    let config_clone = config.clone();
-                                    let call_repo_clone = call_repo.clone();
-                                    let job_repo_clone = job_repo.clone();
-                                    let storage_clone = storage.clone();
-                                    let pool_clone = pool.clone();
-                                    let update_clone = update.clone();
-
-                                    tokio::spawn(async move {
-                                        if let Err(e) = handle_telegram_update(
-                                            &client_clone,
-                                            &token_clone,
-                                            &config_clone,
-                                            call_repo_clone,
-                                            job_repo_clone,
-                                            storage_clone,
-                                            &pool_clone,
-                                            &update_clone,
-                                        )
-                                        .await
-                                        {
-                                            error!("Error processing Telegram update: {e}");
-                                        }
-                                    });
-                                }
-                            }
-                        }
+                        warn!(
+                            "Telegram getUpdates returned {}; backing off {:?}",
+                            resp.status(),
+                            backoff
+                        );
+                        None
                     }
                     Err(e) => {
-                        warn!("Telegram long-poll connection error: {e}. Retrying in 5s...");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        warn!(
+                            "Telegram long-poll connection error: {}; backing off {:?}",
+                            e.without_url(),
+                            backoff
+                        );
+                        None
+                    }
+                };
+
+                let Some(json) = payload else {
+                    tokio::select! {
+                        () = cancellation_token.cancelled() => break,
+                        () = tokio::time::sleep(backoff) => {}
+                    }
+                    backoff = (backoff * 2).min(Duration::from_secs(60));
+                    continue;
+                };
+                backoff = Duration::from_secs(1);
+
+                let Some(updates) = json["result"].as_array() else {
+                    continue;
+                };
+
+                // Processed sequentially and the offset advanced only after the
+                // handler returns. Previously the offset moved *before* an
+                // unbounded `tokio::spawn`, so any handler failure dropped that
+                // voice note permanently — Telegram never resends an
+                // acknowledged update. Serial costs nothing real: STT is
+                // serialized by the GPU semaphore regardless.
+                for update in updates {
+                    if cancellation_token.is_cancelled() {
+                        break;
+                    }
+                    if let Err(e) = handle_telegram_update(
+                        &client,
+                        &token,
+                        &config,
+                        call_repo.clone(),
+                        job_repo.clone(),
+                        storage.clone(),
+                        update,
+                    )
+                    .await
+                    {
+                        error!("Error processing Telegram update: {e}");
+                    }
+                    if let Some(update_id) = update["update_id"].as_i64() {
+                        offset = update_id + 1;
                     }
                 }
             }
+
+            info!("Telegram bot long-poll loop stopped");
         });
     }
 }
@@ -118,7 +164,6 @@ async fn handle_telegram_update(
     call_repo: Arc<dyn CallRepository>,
     job_repo: Arc<dyn JobRepository>,
     storage: Arc<dyn RecordingStorage>,
-    pool: &sqlx::SqlitePool,
     update: &Value,
 ) -> anyhow::Result<()> {
     let message = update.get("message").or_else(|| update.get("channel_post"));
@@ -207,7 +252,7 @@ I will automatically:
     let audio_bytes = audio_resp.bytes().await?;
 
     // 3. Save into RecordingStorage
-    let org_id = OrgId(uuid::Uuid::parse_str(DEFAULT_ORG_ID).unwrap());
+    let org_id = OrgId::DEFAULT;
     let call = Call::new(
         org_id,
         Some(format!(
@@ -259,45 +304,49 @@ I will automatically:
 
     job_repo.enqueue(&enqueue_req).await?;
 
-    // 5. Await analysis completion (poll SQLite every 2s for up to 180s)
+    // 5. Await analysis completion via the repositories rather than raw SQL.
     let mut poll_attempts = 0;
     let call_id_str = call.id.to_string();
+    let mut completed = false;
 
     while poll_attempts < 90 {
         tokio::time::sleep(Duration::from_secs(2)).await;
         poll_attempts += 1;
 
-        let status_row: Option<(String,)> =
-            sqlx::query_as("SELECT processing_status FROM calls WHERE id = ?")
-                .bind(&call_id_str)
-                .fetch_optional(pool)
-                .await?;
-
-        if let Some((status,)) = status_row {
-            if status == ProcessingStatus::Completed.as_str() {
-                break;
-            }
-            if status == ProcessingStatus::Failed.as_str() {
-                send_telegram_message(
-                    client,
-                    token,
-                    chat_id,
-                    "⚠️ *Processing encountered an issue.* Please check audio clarity.",
-                )
-                .await?;
-                return Ok(());
+        if let Some(current) = call_repo.get_by_id(call.id).await? {
+            match current.processing_status {
+                ProcessingStatus::Completed => {
+                    completed = true;
+                    break;
+                }
+                ProcessingStatus::Failed => {
+                    send_telegram_message(
+                        client,
+                        token,
+                        chat_id,
+                        "⚠️ *Processing encountered an issue.* Please check audio clarity.",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                _ => {}
             }
         }
     }
 
-    // 6. Fetch Analysis result
-    let analysis_row: Option<(String, String)> =
-        sqlx::query_as("SELECT title, full_analysis_json FROM call_analyses WHERE call_id = ?")
-            .bind(&call_id_str)
-            .fetch_optional(pool)
-            .await?;
+    if !completed {
+        send_telegram_message(
+            client,
+            token,
+            chat_id,
+            "⏱️ Still processing. Check the web UI for the result.",
+        )
+        .await?;
+        return Ok(());
+    }
 
-    let Some((_title, full_json)) = analysis_row else {
+    // 6. Fetch the analysis result
+    let Some((_title, full_json)) = call_repo.get_analysis_json(call.id).await? else {
         send_telegram_message(
             client,
             token,

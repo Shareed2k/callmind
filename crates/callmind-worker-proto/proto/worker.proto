@@ -1,0 +1,255 @@
+syntax = "proto3";
+
+// Contract between the CallMind service and a remote processing worker.
+//
+// This is the plugin boundary. A worker is a separate program — potentially
+// closed-source, potentially not written in Rust — that speaks only this
+// service. It never touches the database, holds no database credentials, and
+// does not know whether the service stores data in SQLite or Postgres. That
+// keeps workers architecture-independent: a Metal Mac, a CUDA box and a Vulkan
+// box can all serve the same queue.
+//
+// A worker performs transcription only, which is the expensive GPU stage.
+// Handing back a transcript returns the job to the queue, where the service runs
+// the cheap analysis stage and reuses the stored transcript instead of repeating
+// the work.
+package callmind.worker.v1;
+
+service Worker {
+  // Take the next available job, with a lease.
+  rpc Lease(LeaseRequest) returns (LeaseResponse);
+
+  // Stream the job's audio. Server-streaming so a worker never has to hold a
+  // whole recording in memory before it starts.
+  rpc StreamRecording(StreamRecordingRequest) returns (stream RecordingChunk);
+
+  // Hold the lease while working. A worker that stops calling this loses the
+  // job to the service's stale-lease reaper.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Hand back a finished transcript.
+  rpc SubmitTranscript(SubmitTranscriptRequest) returns (SubmitTranscriptResponse);
+
+  // Hand back the result of an analysis plugin, such as acoustic per-speaker
+  // emotion detection.
+  rpc SubmitPluginResult(SubmitPluginResultRequest) returns (SubmitPluginResultResponse);
+
+  // Give a job back after a failure.
+  rpc FailJob(FailJobRequest) returns (FailJobResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Leasing
+// ---------------------------------------------------------------------------
+
+message LeaseRequest {
+  // Stable identity for this worker; it owns the lease. Include the host and
+  // the acceleration backend so leases are attributable.
+  string worker_id = 1;
+  // Job kinds this worker can handle. Empty means the default pipeline kind.
+  repeated string kinds = 2;
+}
+
+message LeaseResponse {
+  // Absent when the queue is empty.
+  optional Job job = 1;
+  // Renew the lease at least this often, or it will be reaped.
+  uint64 lease_timeout_secs = 2;
+}
+
+message Job {
+  string job_id = 1;
+  string kind = 2;
+  string call_id = 3;
+  // Opaque pass-through: the service's own job payload. Deliberately not
+  // modelled field by field — a worker acts on `language_hint` and otherwise
+  // returns it untouched.
+  string payload_json = 4;
+  int32 attempt = 5;
+  int32 max_attempts = 6;
+  // Language code ("he", "ru", ...) when the caller pinned one, else empty.
+  string language_hint = 7;
+  string mime_type = 8;
+  uint64 file_size_bytes = 9;
+}
+
+// ---------------------------------------------------------------------------
+// Audio
+// ---------------------------------------------------------------------------
+
+message StreamRecordingRequest {
+  string worker_id = 1;
+  string job_id = 2;
+}
+
+message RecordingChunk {
+  bytes data = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Lease upkeep and completion
+// ---------------------------------------------------------------------------
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  string job_id = 2;
+}
+
+message HeartbeatResponse {
+  // False once the lease has been reaped or taken over: stop working and lease
+  // again rather than finishing work nobody will accept.
+  bool still_leased = 1;
+}
+
+message SubmitTranscriptRequest {
+  string worker_id = 1;
+  string job_id = 2;
+  Transcript transcript = 3;
+}
+
+message SubmitTranscriptResponse {
+  // Echoes what the service stored, as a sanity check for the worker.
+  uint32 segments_stored = 1;
+}
+
+message FailJobRequest {
+  string worker_id = 1;
+  string job_id = 2;
+  string error = 3;
+  // Whether the service should allow another attempt.
+  bool retryable = 4;
+}
+
+message FailJobResponse {}
+
+// ---------------------------------------------------------------------------
+// Transcript
+//
+// Modelled properly rather than passed as an opaque JSON blob: this is the
+// payload a worker actually produces, so it is the part of the contract that
+// most needs to be explicit.
+// ---------------------------------------------------------------------------
+
+enum SpeakerRole {
+  SPEAKER_ROLE_UNSPECIFIED = 0;
+  SPEAKER_ROLE_SPEAKER1 = 1;
+  SPEAKER_ROLE_SPEAKER2 = 2;
+  SPEAKER_ROLE_PARTICIPANT = 3;
+  SPEAKER_ROLE_AGENT = 4;
+  SPEAKER_ROLE_CUSTOMER = 5;
+  SPEAKER_ROLE_SUPERVISOR = 6;
+  SPEAKER_ROLE_UNKNOWN = 7;
+}
+
+enum TextDirection {
+  TEXT_DIRECTION_UNSPECIFIED = 0;
+  TEXT_DIRECTION_LTR = 1;
+  TEXT_DIRECTION_RTL = 2;
+}
+
+message LanguageProbability {
+  // Language code: "he", "ru", "en", "ar", "und", or any other BCP-47-ish tag.
+  // A string rather than an enum because the service's own type carries an
+  // open-ended variant, and round-trips through this representation losslessly.
+  string language = 1;
+  float probability = 2;
+}
+
+message SpeakerMetadata {
+  uint32 speaker_id = 1;
+  SpeakerRole role = 2;
+  uint64 talk_time_ms = 3;
+  uint64 word_count = 4;
+}
+
+message TranscriptWord {
+  string text = 1;
+  uint64 start_ms = 2;
+  uint64 end_ms = 3;
+  uint32 speaker_id = 4;
+  SpeakerRole speaker_role = 5;
+  string language = 6;
+  optional float confidence = 7;
+}
+
+message TranscriptSegment {
+  string id = 1;
+  string call_id = 2;
+  uint32 sequence = 3;
+  uint32 speaker_id = 4;
+  SpeakerRole speaker_role = 5;
+  string language = 6;
+  TextDirection text_direction = 7;
+  uint64 start_ms = 8;
+  uint64 end_ms = 9;
+  string raw_text = 10;
+  string normalized_text = 11;
+  repeated TranscriptWord words = 12;
+}
+
+message Transcript {
+  string call_id = 1;
+  repeated LanguageProbability languages = 2;
+  repeated SpeakerMetadata speakers = 3;
+  repeated TranscriptSegment segments = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Plugin results
+//
+// A generic envelope with typed variants for the payloads the core understands,
+// plus a JSON escape hatch for plugins it does not. Typed where the core cares,
+// extensible where it does not — adding a plugin needs no schema change.
+// ---------------------------------------------------------------------------
+
+message SubmitPluginResultRequest {
+  string worker_id = 1;
+  string job_id = 2;
+  // Stable plugin identifier, e.g. "acoustic-emotions". Used as the storage key
+  // and to pick a renderer.
+  string plugin = 3;
+
+  oneof payload {
+    SpeakerEmotions speaker_emotions = 4;
+    // For plugins the core has no typed contract for. The plugin and its
+    // renderer agree on the shape.
+    string json = 5;
+  }
+}
+
+message SubmitPluginResultResponse {}
+
+message EmotionScore {
+  // One of: anger, fear, joy, surprise, sadness, disgust, anticipation, trust,
+  // neutral. A string rather than an enum so a plugin can report a label this
+  // version of the core does not yet know.
+  string emotion = 1;
+  // 0.0 to 1.0.
+  float score = 2;
+}
+
+// Emotion over one stretch of speech by one speaker.
+message SpeakerEmotionSpan {
+  uint32 speaker_id = 1;
+  uint64 start_ms = 2;
+  uint64 end_ms = 3;
+  repeated EmotionScore scores = 4;
+}
+
+// Whole-call aggregate for one speaker.
+message SpeakerEmotionSummary {
+  uint32 speaker_id = 1;
+  repeated EmotionScore scores = 2;
+  // Highest-scoring label, for convenience.
+  string dominant = 3;
+}
+
+// Acoustic emotion analysis: derived from the audio, per speaker, unlike the
+// lexicon-based text classifier that ships in the core.
+message SpeakerEmotions {
+  string call_id = 1;
+  repeated SpeakerEmotionSpan spans = 2;
+  repeated SpeakerEmotionSummary summaries = 3;
+  // Free-form model identifier, so a stored result can be attributed.
+  string model = 4;
+}

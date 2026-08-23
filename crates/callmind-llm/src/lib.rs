@@ -1,3 +1,9 @@
+//! LLM adapters and localized prompt templates.
+//!
+//! Ollama, OpenAI-compatible and Anthropic backends sit behind [`LlmEngine`],
+//! with a heuristic local engine as the offline fallback. Prompts are built in
+//! the language of the conversation so summaries come back in that language.
+
 pub mod errors;
 pub mod local;
 pub mod mock;
