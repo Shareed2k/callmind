@@ -5,7 +5,7 @@
 **High-Performance Autonomous Conversation Intelligence Platform**
 
 [![CI](https://github.com/callmind/callmind/actions/workflows/ci.yml/badge.svg)](https://github.com/callmind/callmind/actions/workflows/ci.yml)
-[![Rust Version](https://img.shields.io/badge/rust-1.85%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust Version](https://img.shields.io/badge/rust-1.94%2B-blue.svg)](https://www.rust-lang.org)
 [![Edition](https://img.shields.io/badge/edition-2024-purple.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/index.html)
 [![Acceleration](https://img.shields.io/badge/GPU-Metal%20%7C%20Vulkan%20%7C%20CUDA-green.svg)](#hardware-acceleration)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-informational.svg)](LICENSE)
@@ -101,7 +101,7 @@ tar -xzf callmind.tar.gz
 
 ### Option 2: Build from Source
 
-Ensure you have Rust 1.85+ and `libopus` installed (`brew install opus` on macOS, `apt install libopus-dev` on Debian/Ubuntu):
+Ensure you have Rust 1.94+ and `libopus` installed (`brew install opus` on macOS, `apt install libopus-dev` on Debian/Ubuntu):
 
 ```bash
 # Clone the repository

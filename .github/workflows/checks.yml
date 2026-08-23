@@ -61,6 +61,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake pkg-config libasound2-dev libclang-dev libopus-dev ${{ matrix.apt }}
 
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        # libopus, same as the Linux jobs install. Without it `audiopus_sys`
+        # falls back to building its vendored copy, whose CMakeLists declares
+        # `cmake_minimum_required` below 3.5 -- support current CMake has
+        # removed. A developer with homebrew's opus never sees this.
+        run: brew install opus
+
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -97,6 +105,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake pkg-config libasound2-dev libclang-dev libopus-dev
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        # libopus, same as the Linux jobs install. Without it `audiopus_sys`
+        # falls back to building its vendored copy, whose CMakeLists declares
+        # `cmake_minimum_required` below 3.5 -- support current CMake has
+        # removed. A developer with homebrew's opus never sees this.
+        run: brew install opus
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -160,10 +176,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake pkg-config libasound2-dev libclang-dev libopus-dev
 
-      # Cargo.toml claims rust-version = "1.85"; CI otherwise only ever used
-      # `stable`, leaving that claim unverified.
+      # Cargo.toml claims a `rust-version`; CI otherwise only ever used
+      # `stable`, leaving that claim unverified. Keep this pin in step with
+      # Cargo.toml -- the action cannot read it.
       - name: Set up pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@1.85.0
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
