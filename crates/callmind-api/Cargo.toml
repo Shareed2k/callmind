@@ -16,11 +16,12 @@ callmind-db.workspace = true
 callmind-storage.workspace = true
 callmind-jobs.workspace = true
 callmind-transcript.workspace = true
+callmind-worker-proto.workspace = true
+tonic.workspace = true
 callmind-analysis.workspace = true
 callmind-search.workspace = true
 callmind-ui.workspace = true
 callmind-llm.workspace = true
-sqlx.workspace = true
 
 axum.workspace = true
 tower.workspace = true
@@ -44,3 +45,8 @@ reqwest.workspace = true
 anyhow.workspace = true
 sha2.workspace = true
 hex.workspace = true
+base64 = "0.22"
+subtle = "2.6"
+
+[dev-dependencies]
+tokio-stream.workspace = true

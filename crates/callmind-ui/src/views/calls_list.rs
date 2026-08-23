@@ -105,9 +105,22 @@ pub fn render_calls_list(items: &[CallListItem], pagination: &PaginationInfo) ->
                 |dt| dt.format("%Y-%m-%d %H:%M").to_string(),
             );
 
-            let phone_from =
-                html_escape::encode_text(call.phone_from.as_deref().unwrap_or("Unknown"));
-            let phone_to = html_escape::encode_text(call.phone_to.as_deref().unwrap_or("Unknown"));
+            // Who was on the call. A voice note or an uploaded file has no
+            // numbers at all, and "Unknown -> Unknown" is noise rather than
+            // information -- an em dash says the same thing without pretending
+            // two sides were identified.
+            let parties = match (call.phone_from.as_deref(), call.phone_to.as_deref()) {
+                (None, None) => "&mdash;".to_string(),
+                (Some(from), None) => html_escape::encode_text(from).to_string(),
+                (None, Some(to)) => {
+                    format!("&rarr; {}", html_escape::encode_text(to))
+                }
+                (Some(from), Some(to)) => format!(
+                    "{} &rarr; {}",
+                    html_escape::encode_text(from),
+                    html_escape::encode_text(to)
+                ),
+            };
             let status = html_escape::encode_text(call.processing_status.as_str());
             let status_badge_class = if status == "completed" {
                 "badge-completed"
@@ -151,7 +164,7 @@ pub fn render_calls_list(items: &[CallListItem], pagination: &PaginationInfo) ->
                   <td>{started_str}</td>
                   <td><span class="badge {badge_class}">{badge_label}</span></td>
                   <td>{duration_str}</td>
-                  <td>{phone_from} &rarr; {phone_to}</td>
+                  <td>{parties}</td>
                   <td><span class="badge {status_badge_class}">{status}</span></td>
                   <td>
                     <div style="display:flex; align-items:center; gap:0.4rem;">
@@ -169,8 +182,7 @@ pub fn render_calls_list(items: &[CallListItem], pagination: &PaginationInfo) ->
                 badge_class = badge_class,
                 badge_label = badge_label,
                 duration_str = duration_str,
-                phone_from = phone_from,
-                phone_to = phone_to,
+                parties = parties,
                 status = status,
                 status_badge_class = status_badge_class
             );

@@ -5,8 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use callmind_core::{Call, CallDirection, CallFilter, CallId, CreateCallRequest, OrgId};
-
-const DEFAULT_ORG_ID: &str = "00000000-0000-0000-0000-000000000001";
+use tracing::warn;
 
 #[utoipa::path(
     post,
@@ -24,9 +23,7 @@ pub async fn create_call(
     headers: HeaderMap,
     Json(payload): Json<CreateCallRequest>,
 ) -> Result<Response, ApiError> {
-    let org_id = payload
-        .organization_id
-        .unwrap_or_else(|| OrgId(uuid::Uuid::parse_str(DEFAULT_ORG_ID).unwrap()));
+    let org_id = payload.organization_id.unwrap_or(OrgId::DEFAULT);
 
     // Check idempotency via external_id or Idempotency-Key header
     let idempotency_key = headers
@@ -113,16 +110,25 @@ pub async fn delete_call(
     State(state): State<AppState>,
     Path(id): Path<CallId>,
 ) -> Result<StatusCode, ApiError> {
-    // If recording exists, delete from storage
+    // If recording exists, delete from storage along with the cached WAV
+    // transcode the player may have generated for it.
     if let Some(recording) = state.call_repo.get_recording_by_call_id(id).await? {
-        let _ = state.storage.delete(&recording.storage_key).await;
+        let cache_key = format!("{}.16k.wav", recording.storage_key);
+        if let Err(e) = state.storage.delete(&recording.storage_key).await {
+            warn!("Failed to delete recording {}: {e}", recording.storage_key);
+        }
+        // Absent unless the browser ever requested the fallback.
+        if state.storage.exists(&cache_key).await.unwrap_or(false) {
+            if let Err(e) = state.storage.delete(&cache_key).await {
+                warn!("Failed to delete cached transcode {cache_key}: {e}");
+            }
+        }
     }
 
     // Clean up full-text search index
-    let _ = sqlx::query("DELETE FROM fts_calls WHERE call_id = ?")
-        .bind(id.to_string())
-        .execute(&state.pool)
-        .await;
+    if let Err(e) = state.search.delete_index(id).await {
+        warn!("Failed to remove call {id} from the search index: {e}");
+    }
 
     let deleted = state.call_repo.delete(id).await?;
     if deleted {
@@ -162,31 +168,17 @@ pub async fn update_call(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Call {id} not found")))?;
 
-    let call_id_str = id.to_string();
-
     if let Some(ref title) = payload.title {
-        sqlx::query("UPDATE call_analyses SET title = ? WHERE call_id = ?")
-            .bind(title)
-            .bind(&call_id_str)
-            .execute(&state.pool)
-            .await?;
+        state.call_repo.update_analysis_title(id, title).await?;
 
-        sqlx::query("UPDATE fts_calls SET title = ? WHERE call_id = ?")
-            .bind(title)
-            .bind(&call_id_str)
-            .execute(&state.pool)
-            .await?;
+        state.search.update_indexed_title(id, title).await?;
     }
 
     if let Some(ref speaker_map) = payload.speaker_names {
         // Update speaker labels in transcript_json if it exists
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT transcript_json FROM call_transcripts WHERE call_id = ?")
-                .bind(&call_id_str)
-                .fetch_optional(&state.pool)
-                .await?;
+        let row = state.call_repo.get_transcript_json(id).await?;
 
-        if let Some((raw_json,)) = row {
+        if let Some(raw_json) = row {
             if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(&raw_json) {
                 if let Some(segments) = json_val
                     .get_mut("segments")
@@ -202,13 +194,10 @@ pub async fn update_call(
                         }
                     }
                     let updated_json = serde_json::to_string(&json_val).unwrap_or(raw_json);
-                    sqlx::query(
-                        "UPDATE call_transcripts SET transcript_json = ? WHERE call_id = ?",
-                    )
-                    .bind(&updated_json)
-                    .bind(&call_id_str)
-                    .execute(&state.pool)
-                    .await?;
+                    state
+                        .call_repo
+                        .update_transcript_json(id, &updated_json)
+                        .await?;
                 }
             }
         }
@@ -298,14 +287,9 @@ pub async fn export_transcript(
     Query(query): Query<ExportCallQuery>,
 ) -> Result<Response, ApiError> {
     let call_id_str = id.to_string();
-    let transcript_row: Option<(String,)> =
-        sqlx::query_as("SELECT transcript_json FROM call_transcripts WHERE call_id = ?")
-            .bind(&call_id_str)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Database error: {e}")))?;
+    let transcript_row = state.call_repo.get_transcript_json(id).await?;
 
-    let (json_str,) = transcript_row
+    let json_str = transcript_row
         .ok_or_else(|| ApiError::NotFound(format!("Transcript for call {id} not found")))?;
 
     let transcript: callmind_transcript::Transcript = serde_json::from_str(&json_str)
@@ -339,14 +323,9 @@ pub async fn export_transcript(
             serde_json::to_string_pretty(&transcript).unwrap_or_default(),
         ),
         "ics" | "calendar" => {
-            let analysis_row: Option<(String,)> =
-                sqlx::query_as("SELECT full_analysis_json FROM call_analyses WHERE call_id = ?")
-                    .bind(&call_id_str)
-                    .fetch_optional(&state.pool)
-                    .await
-                    .unwrap_or(None);
+            let analysis_row = state.call_repo.get_analysis_json(id).await.unwrap_or(None);
 
-            let (title, summary, location) = if let Some((raw_json,)) = analysis_row {
+            let (title, summary, location) = if let Some((_t, raw_json)) = analysis_row {
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw_json) {
                     let t = val
                         .get("title")
@@ -424,31 +403,69 @@ pub async fn export_transcript(
     )
 )]
 pub async fn reanalyze_all_calls(State(state): State<AppState>) -> Result<Response, ApiError> {
-    let completed_calls = state
-        .call_repo
-        .list(&CallFilter {
-            status: Some(callmind_core::ProcessingStatus::Completed),
-            limit: Some(100_000),
-            offset: Some(0),
-            ..Default::default()
-        })
-        .await?;
+    /// Page size for walking completed calls. The previous implementation asked
+    /// for up to 100_000 in one go and held every `Call` in memory at once.
+    const PAGE: u32 = 500;
 
-    let mut queued_count = 0;
-    for call in completed_calls {
-        let enqueue_req = callmind_core::EnqueueJob::new(
-            callmind_core::JobKind::IngestRecording,
-            serde_json::json!({ "call_id": call.id.to_string() }),
-        )
-        .with_call_id(call.id);
-        if state.job_repo.enqueue(&enqueue_req).await.is_ok() {
-            queued_count += 1;
+    let mut queued = 0usize;
+    let mut failed = 0usize;
+    let mut offset = 0u32;
+
+    loop {
+        let page = state
+            .call_repo
+            .list(&CallFilter {
+                status: Some(callmind_core::ProcessingStatus::Completed),
+                limit: Some(PAGE),
+                offset: Some(offset),
+                ..Default::default()
+            })
+            .await?;
+
+        if page.is_empty() {
+            break;
         }
+        let page_len = u32::try_from(page.len()).unwrap_or(PAGE);
+
+        for call in page {
+            let enqueue_req = callmind_core::EnqueueJob::new(
+                callmind_core::JobKind::IngestRecording,
+                serde_json::json!({ "call_id": call.id.to_string() }),
+            )
+            .with_call_id(call.id);
+
+            // Errors were swallowed by `.is_ok()`, so a half-failed sweep
+            // reported a plausible count and no reason.
+            match state.job_repo.enqueue(&enqueue_req).await {
+                Ok(_) => queued += 1,
+                Err(e) => {
+                    failed += 1;
+                    warn!("Failed to enqueue reanalysis for call {}: {e}", call.id);
+                }
+            }
+        }
+
+        if page_len < PAGE {
+            break;
+        }
+        offset += page_len;
     }
+
+    // Stored transcripts are reused, so this re-runs the analysis stage only.
+    // It used to redo speech-to-text as well, which on an archive of this size
+    // is days of GPU time.
+    warn!(
+        "Queued reanalysis of {queued} call(s) ({failed} failed to enqueue). \
+         Stored transcripts are reused; only the analysis stage re-runs."
+    );
 
     Ok((
         StatusCode::ACCEPTED,
-        Json(serde_json::json!({ "status": "queued", "count": queued_count })),
+        Json(serde_json::json!({
+            "status": "queued",
+            "count": queued,
+            "failed": failed,
+        })),
     )
         .into_response())
 }
@@ -462,6 +479,13 @@ pub struct ReprocessResponse {
 #[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
 pub struct ReprocessCallQuery {
     pub language: Option<String>,
+    /// How many people are on the recording, when the caller knows.
+    ///
+    /// The count cannot be recovered from the audio -- measured in
+    /// `callmind-diarization/tests/onnx_centroid_probe.rs` -- so a recording that
+    /// came back with the wrong number of speakers is fixed by saying so here.
+    /// `1` for a voice note or a microphone test.
+    pub speakers: Option<usize>,
 }
 
 #[utoipa::path(
@@ -494,12 +518,23 @@ pub async fn reprocess_call(
         .update_status(id, callmind_core::ProcessingStatus::Pending)
         .await?;
 
-    // Re-enqueue job with optional language hint
-    let mut payload = serde_json::json!({ "call_id": id.to_string() });
+    // Re-enqueue with an optional language hint.
+    //
+    // Reprocessing one call means redoing it properly, including transcription —
+    // that is the point of the endpoint, and a language hint only takes effect
+    // during transcription. `reanalyze-all` deliberately omits this flag so it
+    // reuses stored transcripts and only re-runs the analysis.
+    let mut payload = serde_json::json!({
+        "call_id": id.to_string(),
+        "force_retranscribe": true,
+    });
     if let Some(ref lang) = query.language {
         if lang != "auto" && !lang.is_empty() {
             payload["language_hint"] = serde_json::Value::String(lang.clone());
         }
+    }
+    if let Some(speakers) = query.speakers {
+        payload["expected_speakers"] = serde_json::Value::from(speakers.clamp(1, 10));
     }
 
     let enqueue_req =

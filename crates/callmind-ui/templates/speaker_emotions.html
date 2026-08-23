@@ -1,0 +1,20 @@
+{# Acoustic per-speaker emotion analysis contributed by a plugin. #}
+<div class="emotions-card">
+  <h3>Acoustic emotion by speaker</h3>
+  {% if model %}<p class="emotions-source">Model: {{ model }}</p>{% endif %}
+  {% for speaker in summaries %}
+  <div class="emotions-speaker">
+    <h4>Speaker {{ speaker.speaker_id }} — <strong>{{ speaker.dominant }}</strong></h4>
+    <ul class="emotions-bars">
+      {% for s in speaker.scores %}
+      <li>
+        <span class="emotion-label">{{ s.emotion }}</span>
+        <span class="emotion-bar" style="width: {{ (s.score * 100) | round | int }}%"></span>
+        <span class="emotion-value">{{ (s.score * 100) | round | int }}%</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endfor %}
+  <p class="emotions-source">From audio, per speaker.</p>
+</div>

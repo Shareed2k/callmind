@@ -12,7 +12,13 @@ permissions:
   packages: write
 
 jobs:
+  # Gate shipping on the same suite CI runs. Tag pushes do not trigger
+  # ci.yml at all, so without this a release could ship untested.
+  checks:
+    uses: ./.github/workflows/checks.yml
+
   build-and-push:
+    needs: checks
     name: Build & Push (${{ matrix.flavor }})
     runs-on: ubuntu-latest
     strategy:

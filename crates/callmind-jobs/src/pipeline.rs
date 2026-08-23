@@ -8,10 +8,9 @@ use callmind_db::CallRepository;
 use callmind_search::SearchEngine;
 use callmind_storage::RecordingStorage;
 use callmind_transcript::AudioTranscriber;
-use sqlx::SqlitePool;
 use std::str::FromStr;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Complete multi-stage call intelligence processing pipeline handler.
 pub struct CallPipelineHandler {
@@ -19,8 +18,7 @@ pub struct CallPipelineHandler {
     pub storage: Arc<dyn RecordingStorage>,
     pub transcriber: Arc<AudioTranscriber>,
     pub analyzer: Arc<AnalysisEngine>,
-    pub search_engine: Arc<SearchEngine>,
-    pub pool: SqlitePool,
+    pub search: Arc<SearchEngine>,
 }
 
 #[async_trait]
@@ -62,178 +60,217 @@ impl JobHandler for CallPipelineHandler {
             .update_status(call_id, ProcessingStatus::Processing)
             .await;
 
-        // 1. Load and decode audio file
-        let local_path = self
-            .storage
-            .get_local_path(&recording.storage_key)
-            .await
-            .map_err(|e| {
-                JobExecutionError::Retryable(format!("Failed to locate audio recording: {e}"))
-            })?;
-
-        let decoded_audio = AudioDecoder::decode_file(&local_path)
-            .map_err(|e| JobExecutionError::Failed(format!("Audio decoding failed: {e}")))?;
-
-        if ctx.cancellation_token.is_cancelled() {
-            return Err(JobExecutionError::Cancelled);
-        }
-
-        // 2. Deep Audio Transcription (VAD, LID, Parallel STT + Diarization, Alignment, Normalization)
-        let explicit_lang: Option<callmind_core::Language> = ctx
+        // 1. Reuse an already-stored transcript when there is one.
+        //
+        // Transcription is by far the most expensive stage — measured at ~520s
+        // for a 43-minute call — and it used to be redone on every attempt.
+        // A `docker stop` or a retryable failure after transcription therefore
+        // threw away minutes of GPU work, and `reanalyze-all` re-ran
+        // speech-to-text for the whole archive when all it needed was the LLM.
+        //
+        // `force_retranscribe` in the payload opts out, for when the audio or the
+        // STT configuration is what changed.
+        let force_retranscribe = ctx
             .job
             .payload
-            .get("language_hint")
-            .and_then(|v| v.as_str())
-            .and_then(|l| l.parse().ok());
+            .get("force_retranscribe")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
 
-        let channel_mapping: Option<callmind_core::ChannelMapping> = ctx
-            .job
-            .payload
-            .get("channel_mapping")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let stored_transcript = if force_retranscribe {
+            None
+        } else {
+            self.call_repo
+                .get_transcript_json(call_id)
+                .await
+                .map_err(|e| JobExecutionError::Retryable(e.to_string()))?
+        };
 
-        let transcript = self
-            .transcriber
-            .transcribe_conversation(
-                call_id,
-                &decoded_audio,
-                explicit_lang,
-                channel_mapping.as_ref(),
-                &[],
-            )
-            .await
-            .map_err(|e| {
-                JobExecutionError::Retryable(format!("Audio transcription failed: {e}"))
-            })?;
+        let transcript = match stored_transcript
+            .as_deref()
+            .map(serde_json::from_str::<callmind_transcript::Transcript>)
+        {
+            Some(Ok(existing)) => {
+                info!("Reusing stored transcript for Call {call_id}; skipping transcription");
+                existing
+            }
+            other => {
+                if let Some(Err(e)) = other {
+                    warn!(
+                        "Stored transcript for Call {call_id} is unreadable ({e}); re-transcribing"
+                    );
+                }
+
+                let local_path = self
+                    .storage
+                    .get_local_path(&recording.storage_key)
+                    .await
+                    .map_err(|e| {
+                        JobExecutionError::Retryable(format!(
+                            "Failed to locate audio recording: {e}"
+                        ))
+                    })?;
+
+                let decoded_audio = AudioDecoder::decode_file(&local_path).map_err(|e| {
+                    JobExecutionError::Failed(format!("Audio decoding failed: {e}"))
+                })?;
+
+                // Persist the real duration and format now that the audio has
+                // been decoded. Only the batch importer set these before, so
+                // anything arriving through the upload endpoint or a bot showed a
+                // dash for its duration and contributed a zero to the analytics
+                // averages. A failure here is logged, not fatal: it is metadata,
+                // and losing the transcript over it would be a poor trade.
+                if let Err(e) = self
+                    .call_repo
+                    .set_audio_metadata(
+                        call_id,
+                        decoded_audio.duration_ms(),
+                        decoded_audio.channels,
+                        decoded_audio.sample_rate,
+                    )
+                    .await
+                {
+                    tracing::warn!("Failed to record audio metadata for call {call_id}: {e}");
+                }
+
+                if ctx.cancellation_token.is_cancelled() {
+                    return Err(JobExecutionError::Cancelled);
+                }
+
+                // 2. VAD, language ID, STT and diarization, aligned into segments.
+                let explicit_lang: Option<callmind_core::Language> = ctx
+                    .job
+                    .payload
+                    .get("language_hint")
+                    .and_then(|v| v.as_str())
+                    .and_then(|l| l.parse().ok());
+
+                let channel_mapping: Option<callmind_core::ChannelMapping> = ctx
+                    .job
+                    .payload
+                    .get("channel_mapping")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+                // How many people are on the recording, when the ingesting
+                // channel knows. A voice note is one person by construction; a
+                // phone recording is two. Absent the hint the diarizer keeps its
+                // own default rather than guessing from the audio, which is not
+                // something the embeddings support -- see
+                // `callmind-diarization/tests/onnx_centroid_probe.rs`.
+                let expected_speakers = ctx
+                    .job
+                    .payload
+                    .get("expected_speakers")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|n| n.clamp(1, 10) as usize);
+
+                let transcript = self
+                    .transcriber
+                    .transcribe_conversation(
+                        call_id,
+                        &decoded_audio,
+                        explicit_lang,
+                        channel_mapping.as_ref(),
+                        &[],
+                        expected_speakers,
+                    )
+                    .await
+                    .map_err(|e| {
+                        JobExecutionError::Retryable(format!("Audio transcription failed: {e}"))
+                    })?;
+
+                // Committed on its own, before analysis runs, so a crash or a
+                // later-stage failure cannot discard it.
+                let transcript_json = serde_json::to_string(&transcript).map_err(|e| {
+                    JobExecutionError::Retryable(format!("Failed to serialize transcript: {e}"))
+                })?;
+                self.call_repo
+                    .save_transcript(call_id, &transcript_json)
+                    .await
+                    .map_err(|e| {
+                        JobExecutionError::Retryable(format!("Failed to store transcript: {e}"))
+                    })?;
+
+                transcript
+            }
+        };
 
         if ctx.cancellation_token.is_cancelled() {
             return Err(JobExecutionError::Cancelled);
         }
 
         // 3. Run Conversation Intelligence Analysis
+        //
+        // The organization name is fed straight into the LLM prompt, so passing
+        // a literal "Organization" told the model the company was actually
+        // called that. Fall back to the id only if the row is missing.
+        let organization_name = self
+            .call_repo
+            .get_organization_name(call.organization_id)
+            .await
+            .map_err(|e| JobExecutionError::Retryable(e.to_string()))?
+            .unwrap_or_else(|| call.organization_id.to_string());
+
         let analysis = self
             .analyzer
-            .analyze(&transcript, "Organization", &[])
+            .analyze(&transcript, &organization_name, &[])
             .await
             .map_err(|e| JobExecutionError::Retryable(format!("Analysis engine failed: {e}")))?;
 
-        // 4. Execute Atomic Database Transaction for Transcripts, Analysis, and Status
-        let mut tx = self.pool.begin().await.map_err(|e| {
-            JobExecutionError::Retryable(format!("Failed to begin database transaction: {e}"))
+        // 4. Analysis and the call status commit together; the repository owns
+        // that transaction so the trait stays free of any one database's
+        // connection type.
+        let metrics_json = serde_json::to_string(&analysis.metrics).map_err(|e| {
+            JobExecutionError::Retryable(format!("Failed to serialize analysis metrics: {e}"))
+        })?;
+        let full_analysis_json = serde_json::to_string(&analysis).map_err(|e| {
+            JobExecutionError::Retryable(format!("Failed to serialize analysis: {e}"))
         })?;
 
-        let transcript_json = serde_json::to_string(&transcript).unwrap_or_default();
-        sqlx::query("DELETE FROM call_transcripts WHERE call_id = ?")
-            .bind(call_id.to_string())
-            .execute(&mut *tx)
+        self.call_repo
+            .commit_analysis(
+                &callmind_db::AnalysisRow {
+                    id: analysis.id,
+                    call_id,
+                    title: &analysis.title,
+                    summary: &analysis.summary,
+                    reason: analysis.reason.as_deref(),
+                    resolution: analysis.resolution.as_deref(),
+                    resolved: analysis.resolved,
+                    customer_intent: analysis.customer_intent.as_deref(),
+                    sentiment_score: analysis.sentiment_score,
+                    metrics_json: &metrics_json,
+                    full_analysis_json: &full_analysis_json,
+                    created_at: analysis.created_at,
+                },
+                ProcessingStatus::Completed,
+            )
             .await
-            .map_err(|e| {
-                JobExecutionError::Failed(format!("Failed to delete old transcript: {e}"))
-            })?;
+            .map_err(|e| JobExecutionError::Retryable(format!("Failed to commit analysis: {e}")))?;
 
-        sqlx::query(
-            "INSERT INTO call_transcripts (call_id, transcript_json, created_at) VALUES (?, ?, ?)",
-        )
-        .bind(call_id.to_string())
-        .bind(&transcript_json)
-        .bind(analysis.created_at.to_rfc3339())
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| JobExecutionError::Failed(format!("Failed to insert transcript: {e}")))?;
-
-        let analysis_id = analysis.id.to_string();
-        let title = &analysis.title;
-        let summary = &analysis.summary;
-        let reason = analysis.reason.as_deref();
-        let resolution = analysis.resolution.as_deref();
-        let resolved = i32::from(analysis.resolved);
-        let customer_intent = analysis.customer_intent.as_deref();
-        let sentiment_score = analysis.sentiment_score;
-        let metrics_json = serde_json::to_string(&analysis.metrics).unwrap_or_default();
-        let full_analysis_json = serde_json::to_string(&analysis).unwrap_or_default();
-        let created_at = analysis.created_at.to_rfc3339();
-
-        sqlx::query("DELETE FROM call_analyses WHERE call_id = ?")
-            .bind(call_id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| {
-                JobExecutionError::Failed(format!("Failed to delete old analysis: {e}"))
-            })?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO call_analyses (
-                id, call_id, title, summary, reason, resolution,
-                resolved, customer_intent, sentiment_score,
-                metrics_json, full_analysis_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(&analysis_id)
-        .bind(call_id.to_string())
-        .bind(title)
-        .bind(summary)
-        .bind(reason)
-        .bind(resolution)
-        .bind(resolved)
-        .bind(customer_intent)
-        .bind(sentiment_score)
-        .bind(&metrics_json)
-        .bind(&full_analysis_json)
-        .bind(&created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| JobExecutionError::Failed(format!("Failed to save call analysis: {e}")))?;
-
-        // 11. Index in SQLite FTS5 Full-Text Search inside the atomic transaction
+        // 5. Index for full-text search. Derived data, so it is written after the
+        // commit rather than inside it: a failure here is retryable, and the
+        // retry reuses the transcript and rewrites both idempotently.
         let topic_names: Vec<String> = analysis.topics.iter().map(|t| t.name.clone()).collect();
         let entity_values: Vec<String> =
             analysis.entities.iter().map(|e| e.value.clone()).collect();
         let full_transcript_text = transcript.full_text();
 
-        sqlx::query("DELETE FROM fts_calls WHERE call_id = ?")
-            .bind(call_id.to_string())
-            .execute(&mut *tx)
+        self.search
+            .index_call(callmind_search::IndexCallParams {
+                call_id,
+                org_id: call.organization_id,
+                title: &analysis.title,
+                summary: &analysis.summary,
+                transcript: &full_transcript_text,
+                topics: &topic_names,
+                entities: &entity_values,
+                reason: analysis.reason.as_deref(),
+                resolution: analysis.resolution.as_deref(),
+            })
             .await
-            .map_err(|e| {
-                JobExecutionError::Failed(format!("Failed to clear old FTS index: {e}"))
-            })?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO fts_calls (
-                call_id, organization_id, title, summary, transcript,
-                topics, entities, reason, resolution
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(call_id.to_string())
-        .bind(call.organization_id.to_string())
-        .bind(title)
-        .bind(summary)
-        .bind(&full_transcript_text)
-        .bind(topic_names.join(" "))
-        .bind(entity_values.join(" "))
-        .bind(reason.unwrap_or_default())
-        .bind(resolution.unwrap_or_default())
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| JobExecutionError::Failed(format!("Failed to write FTS index: {e}")))?;
-
-        let now_str = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE calls SET processing_status = 'completed', updated_at = ? WHERE id = ?",
-        )
-        .bind(&now_str)
-        .bind(call_id.to_string())
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| JobExecutionError::Failed(format!("Failed to update call status: {e}")))?;
-
-        tx.commit().await.map_err(|e| {
-            JobExecutionError::Failed(format!("Failed to commit pipeline transaction: {e}"))
-        })?;
+            .map_err(|e| JobExecutionError::Retryable(format!("Failed to write FTS index: {e}")))?;
 
         info!(
             "Successfully finished intelligence pipeline for Call {}",

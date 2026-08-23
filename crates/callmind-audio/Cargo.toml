@@ -19,10 +19,12 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
+opus = "0.3"
+ogg = "0.9"
 
 [dev-dependencies]
 callmind-vad.workspace = true
+tempfile.workspace = true

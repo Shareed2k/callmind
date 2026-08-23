@@ -1,0 +1,15 @@
+{# Lexicon-based emotion distribution computed by the core analyzer. #}
+<div class="emotions-card">
+  <h3>Emotional tone</h3>
+  <p class="emotions-dominant">Dominant: <strong>{{ dominant }}</strong></p>
+  <ul class="emotions-bars">
+    {% for item in scores %}
+    <li>
+      <span class="emotion-label">{{ item.label }}</span>
+      <span class="emotion-bar" style="width: {{ item.percent }}%"></span>
+      <span class="emotion-value">{{ item.percent }}%</span>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="emotions-source">From transcript text, per call.</p>
+</div>

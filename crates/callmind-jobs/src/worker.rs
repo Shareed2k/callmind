@@ -1,8 +1,8 @@
 use crate::errors::JobExecutionError;
 use crate::handler::{JobContext, JobRegistry};
 use callmind_config::JobsConfig;
-use callmind_db::JobRepository;
-use sqlx::SqlitePool;
+use callmind_core::{CallId, ProcessingStatus};
+use callmind_db::{CallRepository, JobRepository};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -12,36 +12,44 @@ use tracing::{error, info, trace, warn};
 /// Tokio-based worker pool managing background job execution.
 pub struct WorkerPool {
     job_repo: Arc<dyn JobRepository>,
+    call_repo: Arc<dyn CallRepository>,
     registry: JobRegistry,
     config: JobsConfig,
     cancellation_token: CancellationToken,
-    pool: Option<SqlitePool>,
     worker_handles: Vec<JoinHandle<()>>,
     cleanup_handle: Option<JoinHandle<()>>,
+}
+
+/// Mark a call failed, logging rather than swallowing the error.
+///
+/// Replaces five hand-written copies of the same `UPDATE calls ...` statement
+/// that bypassed `CallRepository::update_status`.
+async fn fail_call(call_repo: &Arc<dyn CallRepository>, worker_id: &str, call_id: CallId) {
+    if let Err(e) = call_repo
+        .update_status(call_id, ProcessingStatus::Failed)
+        .await
+    {
+        error!("[{worker_id}] Failed to mark call {call_id} as failed: {e}");
+    }
 }
 
 impl WorkerPool {
     pub fn new(
         job_repo: Arc<dyn JobRepository>,
+        call_repo: Arc<dyn CallRepository>,
         registry: JobRegistry,
         config: JobsConfig,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             job_repo,
+            call_repo,
             registry,
             config,
             cancellation_token,
-            pool: None,
             worker_handles: Vec::new(),
             cleanup_handle: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_pool(mut self, pool: SqlitePool) -> Self {
-        self.pool = Some(pool);
-        self
     }
 
     /// Start worker tasks in the background.
@@ -52,39 +60,27 @@ impl WorkerPool {
         );
 
         // Startup reconciliation for orphaned processing calls
-        if let Some(ref pool) = self.pool {
-            let p = pool.clone();
-            tokio::spawn(async move {
-                let now_str = chrono::Utc::now().to_rfc3339();
-                let res = sqlx::query(
-                    r#"
-                    UPDATE calls
-                    SET processing_status = 'failed', updated_at = ?
-                    WHERE processing_status = 'processing'
-                      AND id NOT IN (SELECT call_id FROM jobs WHERE status IN ('pending', 'running'))
-                    "#,
-                )
-                .bind(&now_str)
-                .execute(&p)
-                .await;
-
-                if let Ok(r) = res {
-                    if r.rows_affected() > 0 {
-                        info!(
-                            "Startup reconciliation: marked {} orphaned processing calls as failed",
-                            r.rows_affected()
-                        );
-                    }
+        let reconcile_repo = self.call_repo.clone();
+        tokio::spawn(async move {
+            match reconcile_repo.fail_orphaned_processing().await {
+                Ok(count) if count > 0 => {
+                    info!(
+                        "Startup reconciliation: marked {count} orphaned processing calls as failed"
+                    );
                 }
-            });
-        }
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Startup reconciliation of orphaned calls failed: {e}");
+                }
+            }
+        });
 
         for worker_idx in 0..self.config.workers {
             let worker_id = format!("worker-{}", worker_idx + 1);
             let job_repo = self.job_repo.clone();
             let registry = self.registry.clone();
             let token = self.cancellation_token.clone();
-            let pool_opt = self.pool.clone();
+            let call_repo = self.call_repo.clone();
             let poll_interval = Duration::from_millis(self.config.poll_interval_ms);
             let lock_timeout_secs = self.config.lock_timeout_secs;
 
@@ -152,7 +148,34 @@ impl WorkerPool {
                                         }
                                     });
 
-                                    let exec_res = h.execute(ctx).await;
+                                    // Run the handler in its own task so a panic
+                                    // is contained. Previously a panicking
+                                    // handler killed this worker permanently:
+                                    // the pool never noticed, never restarted
+                                    // it, and capacity silently decayed toward
+                                    // zero while each victim job sat `running`
+                                    // until stale-lock cleanup.
+                                    let exec_res = match tokio::spawn(async move {
+                                        h.execute(ctx).await
+                                    })
+                                    .await
+                                    {
+                                        Ok(res) => res,
+                                        Err(join_err) if join_err.is_panic() => {
+                                            error!(
+                                                "[{worker_id}] Job {job_id} handler panicked: {join_err}"
+                                            );
+                                            Err(JobExecutionError::Failed(format!(
+                                                "handler panicked: {join_err}"
+                                            )))
+                                        }
+                                        Err(join_err) => {
+                                            warn!(
+                                                "[{worker_id}] Job {job_id} handler task aborted: {join_err}"
+                                            );
+                                            Err(JobExecutionError::Cancelled)
+                                        }
+                                    };
                                     let _ = hb_tx.send(());
                                     let _ = hb_handle.await;
 
@@ -194,15 +217,8 @@ impl WorkerPool {
                                                         "[{worker_id}] Failed to mark job {job_id} failed: {e}"
                                                     );
                                                 }
-                                                if let (Some(cid), Some(p)) =
-                                                    (job_call_id, pool_opt.as_ref())
-                                                {
-                                                    let now_str = chrono::Utc::now().to_rfc3339();
-                                                    let _ = sqlx::query("UPDATE calls SET processing_status = 'failed', updated_at = ? WHERE id = ?")
-                                                        .bind(&now_str)
-                                                        .bind(cid.to_string())
-                                                        .execute(p)
-                                                        .await;
+                                                if let Some(cid) = job_call_id {
+                                                    fail_call(&call_repo, &worker_id, cid).await;
                                                 }
                                             }
                                         }
@@ -210,48 +226,26 @@ impl WorkerPool {
                                             warn!(
                                                 "[{worker_id}] Job {job_id} was cancelled during execution"
                                             );
-                                            if let Some(ref p) = pool_opt {
-                                                let now = chrono::Utc::now().to_rfc3339();
-                                                if let Err(e) = sqlx::query(
-                                                    r#"
-                                                    UPDATE jobs
-                                                    SET status = 'pending',
-                                                        attempt = MAX(attempt - 1, 0),
-                                                        run_after = ?,
-                                                        locked_at = NULL,
-                                                        locked_by = NULL,
-                                                        last_error = 'Interrupted by server shutdown',
-                                                        completed_at = NULL
-                                                    WHERE id = ?
-                                                    "#,
+                                            if let Err(e) = job_repo
+                                                .requeue_interrupted(
+                                                    job_id,
+                                                    "Interrupted by server shutdown",
                                                 )
-                                                .bind(&now)
-                                                .bind(job_id.to_string())
-                                                .execute(p)
                                                 .await
+                                            {
+                                                error!(
+                                                    "[{worker_id}] Failed to requeue cancelled job {job_id}: {e}"
+                                                );
+                                            }
+                                            if let Some(cid) = job_call_id {
+                                                if let Err(e) = call_repo
+                                                    .update_status(cid, ProcessingStatus::Pending)
+                                                    .await
                                                 {
                                                     error!(
-                                                        "[{worker_id}] Failed to requeue cancelled job {job_id}: {e}"
+                                                        "[{worker_id}] Failed to reset call {cid} to pending: {e}"
                                                     );
                                                 }
-
-                                                if let Some(call_id) = job_call_id {
-                                                    let _ = sqlx::query(
-                                                        "UPDATE calls SET processing_status = 'pending', updated_at = ? WHERE id = ?",
-                                                    )
-                                                    .bind(&now)
-                                                    .bind(call_id.to_string())
-                                                    .execute(p)
-                                                    .await;
-                                                }
-                                            } else {
-                                                let _ = job_repo
-                                                    .mark_failed(
-                                                        job_id,
-                                                        "Interrupted by server shutdown",
-                                                        Some(Duration::ZERO),
-                                                    )
-                                                    .await;
                                             }
                                         }
                                         Err(JobExecutionError::Failed(err))
@@ -266,15 +260,8 @@ impl WorkerPool {
                                                     "[{worker_id}] Failed to mark job {job_id} failed: {e}"
                                                 );
                                             }
-                                            if let (Some(cid), Some(p)) =
-                                                (job_call_id, pool_opt.as_ref())
-                                            {
-                                                let now_str = chrono::Utc::now().to_rfc3339();
-                                                let _ = sqlx::query("UPDATE calls SET processing_status = 'failed', updated_at = ? WHERE id = ?")
-                                                    .bind(&now_str)
-                                                    .bind(cid.to_string())
-                                                    .execute(p)
-                                                    .await;
+                                            if let Some(cid) = job_call_id {
+                                                fail_call(&call_repo, &worker_id, cid).await;
                                             }
                                         }
                                     }
@@ -287,13 +274,8 @@ impl WorkerPool {
                                     let _ = job_repo
                                         .mark_failed(job_id, "Handler not registered", None)
                                         .await;
-                                    if let (Some(cid), Some(p)) = (job_call_id, pool_opt.as_ref()) {
-                                        let now_str = chrono::Utc::now().to_rfc3339();
-                                        let _ = sqlx::query("UPDATE calls SET processing_status = 'failed', updated_at = ? WHERE id = ?")
-                                            .bind(&now_str)
-                                            .bind(cid.to_string())
-                                            .execute(p)
-                                            .await;
+                                    if let Some(cid) = job_call_id {
+                                        fail_call(&call_repo, &worker_id, cid).await;
                                     }
                                 }
                             }

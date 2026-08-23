@@ -133,6 +133,7 @@ pub enum JobKind {
     BuildTranscript,
     NormalizeTranscript,
     AnalyzeCall,
+    AnalyzeEmotions,
     DeliverWebhook,
 }
 
@@ -147,6 +148,7 @@ impl JobKind {
             Self::BuildTranscript => "build_transcript",
             Self::NormalizeTranscript => "normalize_transcript",
             Self::AnalyzeCall => "analyze_call",
+            Self::AnalyzeEmotions => "analyze_emotions",
             Self::DeliverWebhook => "deliver_webhook",
         }
     }
@@ -171,6 +173,7 @@ impl FromStr for JobKind {
             "build_transcript" => Ok(Self::BuildTranscript),
             "normalize_transcript" => Ok(Self::NormalizeTranscript),
             "analyze_call" => Ok(Self::AnalyzeCall),
+            "analyze_emotions" => Ok(Self::AnalyzeEmotions),
             "deliver_webhook" => Ok(Self::DeliverWebhook),
             other => Err(format!("Unknown job kind: {other}")),
         }

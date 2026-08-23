@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libasound2-dev \
     libclang-dev \
+    libopus-dev \
     libssl-dev \
     libvulkan-dev \
     glslc \
@@ -55,6 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     libasound2t64 \
+    libopus0 \
     libvulkan1 \
     mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*

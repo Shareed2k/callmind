@@ -1,7 +1,9 @@
 use crate::buffer::AudioBuffer;
 use crate::errors::AudioError;
+use crate::opus::{decode_ogg_opus, is_ogg_opus};
 use std::fs::File;
 use std::io::Cursor;
+use std::io::Read;
 use std::path::Path;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
@@ -24,6 +26,26 @@ impl AudioDecoder {
             source: e,
         })?;
 
+        // Sniff the container before handing it to Symphonia: it demuxes OGG but
+        // cannot decode Opus, so those streams need the dedicated path.
+        let mut file = file;
+        let mut prefix = [0u8; 1024];
+        let read = file.read(&mut prefix).map_err(|e| AudioError::Io {
+            path: p.to_path_buf(),
+            source: e,
+        })?;
+        if is_ogg_opus(&prefix[..read]) {
+            let bytes = std::fs::read(p).map_err(|e| AudioError::Io {
+                path: p.to_path_buf(),
+                source: e,
+            })?;
+            return decode_ogg_opus(&bytes);
+        }
+        let file = File::open(p).map_err(|e| AudioError::Io {
+            path: p.to_path_buf(),
+            source: e,
+        })?;
+
         let mut hint = Hint::new();
         if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
             hint.with_extension(ext);
@@ -39,6 +61,10 @@ impl AudioDecoder {
     ) -> Result<AudioBuffer, AudioError> {
         if data.is_empty() {
             return Err(AudioError::EmptyAudio);
+        }
+
+        if is_ogg_opus(data) {
+            return decode_ogg_opus(data);
         }
 
         let mut hint = Hint::new();
@@ -140,5 +166,73 @@ impl AudioDecoder {
         }
 
         Ok(AudioBuffer::new(sample_rate, channels, samples_out))
+    }
+}
+
+/// Track metadata read without decoding any audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioMetadata {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub duration_ms: u64,
+}
+
+impl AudioDecoder {
+    /// Read duration, channel count and sample rate from the container headers.
+    ///
+    /// Batch import used to call `decode_file` for this, decoding every packet of
+    /// every file to learn three numbers — a 43-minute call materialises ~494 MB
+    /// of f32 samples on the way. Symphonia exposes the track's codec parameters
+    /// straight from the header, so no packet is decoded here.
+    ///
+    /// Returns `None` when the container does not declare a frame count (some
+    /// streamed OGG files), leaving the caller to fall back to a full decode.
+    pub fn read_metadata<P: AsRef<Path>>(path: P) -> Result<Option<AudioMetadata>, AudioError> {
+        let p = path.as_ref();
+        let file = File::open(p).map_err(|e| AudioError::Io {
+            path: p.to_path_buf(),
+            source: e,
+        })?;
+
+        let mut hint = Hint::new();
+        if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+            hint.with_extension(ext);
+        }
+
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let probed = symphonia::default::get_probe()
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
+            .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+
+        let Some(track) = probed
+            .format
+            .default_track()
+            .or_else(|| probed.format.tracks().first())
+        else {
+            return Ok(None);
+        };
+
+        let params = &track.codec_params;
+        let Some(sample_rate) = params.sample_rate else {
+            return Ok(None);
+        };
+        let channels = params.channels.map_or(1, |c| c.count() as u16);
+
+        // `n_frames` is per channel, so duration does not depend on channel count.
+        let Some(frames) = params.n_frames else {
+            return Ok(None);
+        };
+        let duration_ms = (frames.saturating_mul(1000)) / u64::from(sample_rate.max(1));
+
+        Ok(Some(AudioMetadata {
+            sample_rate,
+            channels: channels.max(1),
+            duration_ms,
+        }))
     }
 }

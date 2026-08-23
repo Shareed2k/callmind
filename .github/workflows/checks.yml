@@ -1,0 +1,188 @@
+name: Checks
+
+# Reusable so ci.yml, docker.yml and release.yml all gate on the same suite.
+# Tag pushes never triggered ci.yml, so before this the release and image
+# workflows could ship without a single test having run.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check code formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Previously only the macOS/Metal default-feature build was linted, so
+          # the cpu, vulkan and cuda code paths were never checked at all.
+          - name: linux-cpu
+            os: ubuntu-latest
+            flags: --no-default-features --features cpu
+            apt: ""
+          - name: linux-vulkan
+            os: ubuntu-latest
+            flags: --no-default-features --features vulkan
+            apt: libvulkan-dev glslc
+          - name: macos-metal
+            os: macos-latest
+            flags: ""
+            apt: ""
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libasound2-dev libclang-dev libopus-dev ${{ matrix.apt }}
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-${{ matrix.name }}
+
+      - name: Run Clippy lints
+        run: cargo clippy --locked --all-targets ${{ matrix.flags }} -- -D warnings
+
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-cpu
+            os: ubuntu-latest
+            flags: --no-default-features --features cpu
+          - name: macos-metal
+            os: macos-latest
+            flags: ""
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libasound2-dev libclang-dev libopus-dev
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.name }}
+
+      - name: Run workspace tests
+        run: cargo test --locked --workspace ${{ matrix.flags }}
+
+  postgres:
+    name: Postgres schema
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: callmind
+          POSTGRES_PASSWORD: callmind
+          POSTGRES_DB: callmind_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U callmind -d callmind_test"
+          --health-interval 2s --health-timeout 3s --health-retries 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # callmind-db pulls no audio or inference dependencies, so this job needs
+      # nothing from apt.
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: postgres
+
+      # The migration definition is shared, so this is what proves the two
+      # backend-specific pieces — the full-text index and the generated
+      # language column — actually work on Postgres.
+      - name: Apply the schema to Postgres and exercise it
+        env:
+          CALLMIND_TEST_POSTGRES_URL: postgres://callmind:callmind@127.0.0.1:5432/callmind_test
+        run: cargo test --locked -p callmind-db
+
+  msrv:
+    name: MSRV (rust-version in Cargo.toml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libasound2-dev libclang-dev libopus-dev
+
+      # Cargo.toml claims rust-version = "1.85"; CI otherwise only ever used
+      # `stable`, leaving that claim unverified.
+      - name: Set up pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.85.0
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: Check workspace builds on MSRV
+        run: cargo check --locked --workspace --no-default-features --features cpu
+
+  audit:
+    name: Dependency vulnerability audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Audit dependencies for known advisories
+        run: cargo audit

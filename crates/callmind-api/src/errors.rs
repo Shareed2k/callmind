@@ -68,6 +68,15 @@ impl IntoResponse for ApiError {
     }
 }
 
+impl From<callmind_search::SearchError> for ApiError {
+    fn from(err: callmind_search::SearchError) -> Self {
+        match err {
+            callmind_search::SearchError::InvalidQuery(msg) => ApiError::BadRequest(msg),
+            other => ApiError::Internal(other.to_string()),
+        }
+    }
+}
+
 impl From<DbError> for ApiError {
     fn from(err: DbError) -> Self {
         match err {
@@ -85,15 +94,6 @@ impl From<StorageError> for ApiError {
             StorageError::InvalidKey(msg) => ApiError::BadRequest(msg),
             StorageError::QuotaExceeded(msg) => ApiError::PayloadTooLarge(msg),
             StorageError::Io { source, .. } => ApiError::Internal(source.to_string()),
-        }
-    }
-}
-
-impl From<sqlx::Error> for ApiError {
-    fn from(err: sqlx::Error) -> Self {
-        match err {
-            sqlx::Error::RowNotFound => ApiError::NotFound("Database record not found".to_string()),
-            other => ApiError::Internal(other.to_string()),
         }
     }
 }

@@ -23,3 +23,6 @@
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Local hook logs from the agent harness.
+.claude/hooks/.logs/

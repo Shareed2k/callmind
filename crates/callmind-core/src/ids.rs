@@ -124,3 +124,12 @@ impl From<SpeakerId> for u16 {
         s.0
     }
 }
+
+impl OrgId {
+    /// The single organization seeded by the initial migration.
+    ///
+    /// Was a `&str` const duplicated across five call sites, each re-parsed at
+    /// runtime with `Uuid::parse_str(..).unwrap()`. `uuid!` parses at compile
+    /// time, so the unwraps are gone.
+    pub const DEFAULT: Self = Self(uuid::uuid!("00000000-0000-0000-0000-000000000001"));
+}

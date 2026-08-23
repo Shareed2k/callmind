@@ -1,4 +1,8 @@
+use realfft::num_complex::Complex32;
+use realfft::{RealFftPlanner, RealToComplex};
+use std::cell::RefCell;
 use std::f32::consts::PI;
+use std::sync::{Arc, OnceLock};
 
 /// Dimension of the acoustic voice embedding vector.
 pub const EMBEDDING_DIM: usize = 20;
@@ -158,6 +162,26 @@ impl AcousticFeatureExtractor {
             start += FRAME_STEP;
         }
 
+        // Per-utterance cepstral mean normalization, subtracting each mel band's
+        // mean over time.
+        //
+        // Not optional: WeSpeaker and ECAPA-TDNN are both trained on kaldi fbank
+        // with CMN applied, and the frame geometry above (400/160 at 16 kHz =
+        // 25 ms / 10 ms) is already kaldi's. Feeding raw log-mel energies shifts
+        // the input away from the training distribution, and the resulting
+        // embeddings are dominated by recording level and channel rather than by
+        // who is speaking -- measured as barely separating different people at
+        // all (see `tests/embedding_sanity_probe.rs`).
+        if let Some(width) = frames.first().map(Vec::len) {
+            let count = frames.len() as f32;
+            for band in 0..width {
+                let mean = frames.iter().map(|f| f[band]).sum::<f32>() / count;
+                for frame in &mut frames {
+                    frame[band] -= mean;
+                }
+            }
+        }
+
         frames
     }
 
@@ -187,27 +211,53 @@ impl AcousticFeatureExtractor {
     }
 }
 
-/// Compute power spectrum using simplified real DFT.
+/// Cached forward real-FFT plan for `FRAME_SIZE`-length frames. Every hot call
+/// site uses that one length, and planning costs far more than a transform.
+fn frame_fft() -> &'static Arc<dyn RealToComplex<f32>> {
+    static PLAN: OnceLock<Arc<dyn RealToComplex<f32>>> = OnceLock::new();
+    PLAN.get_or_init(|| RealFftPlanner::<f32>::new().plan_fft_forward(FRAME_SIZE))
+}
+
+thread_local! {
+    /// Reused input/output buffers, so the per-frame path stays allocation-free
+    /// apart from the returned spectrum.
+    static FFT_SCRATCH: RefCell<(Vec<f32>, Vec<Complex32>)> = RefCell::new((
+        vec![0.0; FRAME_SIZE],
+        vec![Complex32::new(0.0, 0.0); (FRAME_SIZE / 2) + 1],
+    ));
+}
+
+/// Compute the power spectrum of one frame via a real FFT.
+///
+/// This was a hand-rolled O(n^2) DFT that called `cos` and `sin` once per
+/// (bin, sample) pair: ~160k transcendental calls per 400-sample frame, at 100
+/// frames per second of audio. Same transform, same `1/n` scaling, ~40x less
+/// work.
 fn compute_power_spectrum(frame: &[f32]) -> Vec<f32> {
     let n = frame.len();
     let num_bins = (n / 2) + 1;
-    let mut power = Vec::with_capacity(num_bins);
+    let scale = n as f32;
 
-    for k in 0..num_bins {
-        let mut real = 0.0f32;
-        let mut imag = 0.0f32;
-        let angle_step = 2.0 * PI * (k as f32) / (n as f32);
-
-        for (t, &val) in frame.iter().enumerate() {
-            let angle = angle_step * (t as f32);
-            real += val * angle.cos();
-            imag -= val * angle.sin();
+    // Only FRAME_SIZE has a cached plan. Other lengths are off the hot path, so
+    // plan them on the spot rather than keeping a keyed cache alive.
+    if n != FRAME_SIZE {
+        let plan = RealFftPlanner::<f32>::new().plan_fft_forward(n);
+        let mut input = frame.to_vec();
+        let mut output = plan.make_output_vec();
+        if plan.process(&mut input, &mut output).is_err() {
+            return vec![0.0; num_bins];
         }
-
-        power.push((real * real + imag * imag) / (n as f32));
+        return output.iter().map(|c| c.norm_sqr() / scale).collect();
     }
 
-    power
+    FFT_SCRATCH.with(|cell| {
+        let (input, output) = &mut *cell.borrow_mut();
+        input.copy_from_slice(frame);
+        if frame_fft().process(input, output).is_err() {
+            return vec![0.0; num_bins];
+        }
+        output.iter().map(|c| c.norm_sqr() / scale).collect()
+    })
 }
 
 /// Convert frequency in Hz to Mel scale.
@@ -337,6 +387,105 @@ mod tests {
         assert!(
             dist_different_speakers > dist_same_speaker,
             "Different voices must have higher distance"
+        );
+    }
+
+    /// The previous hand-rolled O(n^2) DFT, kept only as a numerical oracle.
+    fn naive_power_spectrum(frame: &[f32]) -> Vec<f32> {
+        let n = frame.len();
+        let num_bins = (n / 2) + 1;
+        let mut power = Vec::with_capacity(num_bins);
+
+        for k in 0..num_bins {
+            let mut real = 0.0f32;
+            let mut imag = 0.0f32;
+            let angle_step = 2.0 * PI * (k as f32) / (n as f32);
+
+            for (t, &val) in frame.iter().enumerate() {
+                let angle = angle_step * (t as f32);
+                real += val * angle.cos();
+                imag -= val * angle.sin();
+            }
+
+            power.push((real * real + imag * imag) / (n as f32));
+        }
+
+        power
+    }
+
+    fn synth_frame(len: usize, seed_mix: u64) -> Vec<f32> {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ seed_mix;
+        (0..len)
+            .map(|i| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let noise = ((seed >> 11) as f32 / (1u64 << 53) as f32) - 0.5;
+                // Voiced-speech-like mix plus noise.
+                (2.0 * PI * 140.0 * i as f32 / 16_000.0).sin() * 0.6
+                    + (2.0 * PI * 430.0 * i as f32 / 16_000.0).sin() * 0.3
+                    + noise * 0.1
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fft_matches_naive_dft() {
+        for (case, frame) in [
+            ("frame_size", synth_frame(FRAME_SIZE, 1)),
+            ("off_hot_path_len", synth_frame(256, 2)),
+            ("odd_len", synth_frame(257, 3)),
+            ("silence", vec![0.0; FRAME_SIZE]),
+            ("dc", vec![0.7; FRAME_SIZE]),
+        ] {
+            let got = compute_power_spectrum(&frame);
+            let want = naive_power_spectrum(&frame);
+
+            assert_eq!(got.len(), want.len(), "{case}: bin count changed");
+
+            let peak = want.iter().copied().fold(0.0f32, f32::max).max(1e-6);
+            for (bin, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+                // Relative to the spectrum peak: f32 summation order differs, so
+                // exact equality is not achievable, but the transform is.
+                assert!(
+                    (g - w).abs() <= peak * 1e-4,
+                    "{case}: bin {bin} diverged: fft={g} naive={w} peak={peak}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fft_scratch_is_reused_across_threads() {
+        // The hot path keeps its buffers in a thread_local; make sure a second
+        // thread initialises its own rather than panicking or sharing.
+        let frame = synth_frame(FRAME_SIZE, 9);
+        let expected = compute_power_spectrum(&frame);
+        let handle = std::thread::spawn(move || compute_power_spectrum(&frame));
+        assert_eq!(handle.join().unwrap(), expected);
+    }
+
+    #[test]
+    #[ignore = "timing comparison, run with --ignored --nocapture"]
+    fn perf_dft_old_vs_new() {
+        let frames: Vec<Vec<f32>> = (0..200).map(|i| synth_frame(FRAME_SIZE, i)).collect();
+
+        let t0 = std::time::Instant::now();
+        for f in &frames {
+            let _ = naive_power_spectrum(f);
+        }
+        let old = t0.elapsed();
+
+        let t1 = std::time::Instant::now();
+        for f in &frames {
+            let _ = compute_power_spectrum(f);
+        }
+        let new = t1.elapsed();
+
+        println!(
+            "{} frames (2s of audio): old={old:?} new={new:?} speedup={:.0}x",
+            frames.len(),
+            old.as_secs_f64() / new.as_secs_f64().max(1e-9)
         );
     }
 }

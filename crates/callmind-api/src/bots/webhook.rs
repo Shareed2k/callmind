@@ -10,8 +10,6 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::time::Duration;
 
-const DEFAULT_ORG_ID: &str = "00000000-0000-0000-0000-000000000001";
-
 #[derive(Debug, Deserialize)]
 pub struct WebhookQuery {
     #[serde(default)]
@@ -82,7 +80,7 @@ pub async fn handle_audio_webhook(
         ));
     }
 
-    let org_id = OrgId(uuid::Uuid::parse_str(DEFAULT_ORG_ID).unwrap());
+    let org_id = OrgId::DEFAULT;
     let call = Call::new(
         org_id,
         Some(format!(
@@ -163,31 +161,18 @@ pub async fn handle_audio_webhook(
         tokio::time::sleep(Duration::from_secs(2)).await;
         attempts += 1;
 
-        let status_row: Option<(String,)> =
-            sqlx::query_as("SELECT processing_status FROM calls WHERE id = ?")
-                .bind(&call_id_str)
-                .fetch_optional(&state.pool)
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-        if let Some((status,)) = status_row {
-            if status == ProcessingStatus::Completed.as_str() {
-                break;
-            }
-            if status == ProcessingStatus::Failed.as_str() {
-                return Err(ApiError::Internal("Voice processing failed.".into()));
+        if let Some(current) = state.call_repo.get_by_id(call.id).await? {
+            match current.processing_status {
+                ProcessingStatus::Completed => break,
+                ProcessingStatus::Failed => {
+                    return Err(ApiError::Internal("Voice processing failed.".into()));
+                }
+                _ => {}
             }
         }
     }
 
-    let analysis_row: Option<(String, String)> =
-        sqlx::query_as("SELECT title, full_analysis_json FROM call_analyses WHERE call_id = ?")
-            .bind(&call_id_str)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    if let Some((_title, full_json)) = analysis_row {
+    if let Some((_title, full_json)) = state.call_repo.get_analysis_json(call.id).await? {
         let formatted =
             BotResponseFormatter::format(&call_id_str, &full_json, &state.config.server.bind);
 

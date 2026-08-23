@@ -76,6 +76,21 @@ pub const REGISTERED_MODELS: &[ModelSpec] = &[
         sha256: "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
     },
     ModelSpec {
+        id: "diarization-segmentation",
+        kind: "Speaker Segmentation ONNX",
+        filename: "diarization/segmentation.onnx",
+        // The one entry this project hosts rather than mirrors: the published
+        // pyannote export contains a shape-conditional `If` node that a pure-Rust
+        // ONNX runtime cannot translate, so this is a re-export with the input
+        // fixed to one 10-second chunk. Reproduce it -- and re-verify that the
+        // transformation leaves the output unchanged -- with
+        // scripts/export_pyannote_segmentation.py. Upstream is MIT,
+        // Copyright (c) 2022 CNRS.
+        url: "https://huggingface.co/shareed2k/callmind-pyannote-segmentation/resolve/main/segmentation.onnx",
+        size_mb: 6,
+        sha256: "91dbcbee0c2564395ffb1e7cd78935cd764706530f0f336671edc6a534c2bb17",
+    },
+    ModelSpec {
         id: "diarization-embedding",
         kind: "Speaker Embedding ONNX",
         filename: "diarization/speaker_embedding.onnx",

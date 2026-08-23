@@ -135,10 +135,11 @@ pub async fn upload_recording(
 
     if let Err(e) = state.job_repo.enqueue(&enqueue_req).await {
         let _ = state.storage.delete(&storage_key).await;
-        let _ = sqlx::query("DELETE FROM call_recordings WHERE id = ?")
-            .bind(recording.id.to_string())
-            .execute(&state.pool)
-            .await;
+        // Roll back the row so a failed upload does not leave a recording
+        // pointing at bytes that were never stored.
+        if let Err(cleanup) = state.call_repo.delete_recording(recording.id).await {
+            tracing::warn!("Failed to roll back recording {}: {cleanup}", recording.id);
+        }
         return Err(ApiError::from(e));
     }
 
@@ -220,65 +221,60 @@ pub async fn get_recording(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Recording for call {id} not found")))?;
 
-    // If WAV format is requested, transcode on the fly to standard PCM WAV (100% browser compatible)
-    if query.format.as_deref() == Some("wav") {
-        let mut file = state.storage.get(&recording.storage_key).await?;
-        let mut raw_bytes = Vec::with_capacity(recording.file_size_bytes as usize);
-        file.read_to_end(&mut raw_bytes).await.map_err(|e| {
-            ApiError::Internal(format!("Failed to read recording from storage: {e}"))
-        })?;
+    // Browsers that cannot play the stored container (Safari and OGG/Opus, for
+    // example) ask for `?format=wav`. That transcode is cached as a sibling
+    // object: it used to re-decode and re-encode the entire recording on *every
+    // range request*, so each seek in the player cost a full pass over the file.
+    let (storage_key, mime_type) = if query.format.as_deref() == Some("wav") {
+        let cache_key = format!("{}.16k.wav", recording.storage_key);
 
-        let ext = recording
-            .storage_key
-            .split('.')
-            .next_back()
-            .unwrap_or("m4a");
-        let audio_buffer = callmind_audio::AudioDecoder::decode_bytes(&raw_bytes, Some(ext))
-            .map_err(|e| ApiError::Internal(format!("Failed to decode audio to WAV: {e}")))?;
+        if !state.storage.exists(&cache_key).await? {
+            let mut file = state.storage.get(&recording.storage_key).await?;
+            let mut raw_bytes = Vec::with_capacity(recording.file_size_bytes as usize);
+            file.read_to_end(&mut raw_bytes).await.map_err(|e| {
+                ApiError::Internal(format!("Failed to read recording from storage: {e}"))
+            })?;
 
-        let wav_bytes = audio_buffer.to_wav_bytes();
-        let total_size = wav_bytes.len() as u64;
-        let content_disposition = format!("inline; filename=\"call-{id}.wav\"");
+            let ext = recording
+                .storage_key
+                .split('.')
+                .next_back()
+                .unwrap_or("m4a");
+            let decoded = callmind_audio::AudioDecoder::decode_bytes(&raw_bytes, Some(ext))
+                .map_err(|e| ApiError::Internal(format!("Failed to decode audio to WAV: {e}")))?;
+            drop(raw_bytes);
 
-        if let Some(range_header) = headers.get(RANGE).and_then(|v| v.to_str().ok()) {
-            if let Some((start, end)) = parse_range_header(range_header, total_size) {
-                let start_idx = start as usize;
-                let end_idx = (end as usize) + 1;
-                let chunk = wav_bytes[start_idx..end_idx].to_vec();
-                let chunk_size = chunk.len();
-                let content_range = format!("bytes {start}-{end}/{total_size}");
+            // A compatibility shim only, so 16 kHz mono is plenty — it is what
+            // the STT pipeline already uses. At the source rate a one-hour
+            // stereo call is a ~500 MB WAV; this keeps it ~6x smaller.
+            let downsampled = callmind_audio::AudioResampler::resample_to_16k_mono(&decoded)
+                .map_err(|e| ApiError::Internal(format!("Failed to resample audio: {e}")))?;
+            drop(decoded);
 
-                return Ok(Response::builder()
-                    .status(StatusCode::PARTIAL_CONTENT)
-                    .header(CONTENT_TYPE, "audio/wav")
-                    .header(CONTENT_LENGTH, chunk_size.to_string())
-                    .header(CONTENT_RANGE, content_range)
-                    .header(ACCEPT_RANGES, "bytes")
-                    .header(axum::http::header::CONTENT_DISPOSITION, content_disposition)
-                    .body(Body::from(chunk))
-                    .unwrap());
-            }
-
-            return Ok(Response::builder()
-                .status(StatusCode::RANGE_NOT_SATISFIABLE)
-                .header(CONTENT_RANGE, format!("bytes */{total_size}"))
-                .body(Body::empty())
-                .unwrap());
+            let wav_bytes = bytes::Bytes::from(downsampled.to_wav_bytes());
+            let stream = Box::pin(futures_util::stream::once(async move {
+                Ok::<bytes::Bytes, std::io::Error>(wav_bytes)
+            }));
+            state.storage.put(&cache_key, stream).await?;
+            tracing::info!("Cached WAV transcode for call {id}");
         }
 
-        return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "audio/wav")
-            .header(CONTENT_LENGTH, total_size.to_string())
-            .header(ACCEPT_RANGES, "bytes")
-            .header(axum::http::header::CONTENT_DISPOSITION, content_disposition)
-            .body(Body::from(wav_bytes))
-            .unwrap());
-    }
+        (cache_key, "audio/wav")
+    } else {
+        (
+            recording.storage_key.clone(),
+            normalize_mime_type(&recording.mime_type, &recording.storage_key),
+        )
+    };
 
-    let mut file = state.storage.get(&recording.storage_key).await?;
-    let total_size = recording.file_size_bytes;
-    let mime_type = normalize_mime_type(&recording.mime_type, &recording.storage_key);
+    let mut file = state.storage.get(&storage_key).await?;
+    // Read the size from the file rather than the database row: the cached
+    // transcode has its own length, and it guards against a stale stored size.
+    let total_size = file
+        .metadata()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to stat recording: {e}")))?
+        .len();
 
     let ext = match mime_type {
         "audio/mp4" => "m4a",

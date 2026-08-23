@@ -1,3 +1,10 @@
+//! CallMind command-line entry point.
+//!
+//! `serve` runs the HTTP API, the server-rendered UI and the background worker
+//! pool in one process. The other subcommands cover migrations, model weight
+//! management, batch import, diagnostics, benchmarking and reprocessing a single
+//! call.
+
 pub mod models_cli;
 
 use anyhow::{Context, Result};
@@ -14,10 +21,12 @@ use callmind_api::{AppState, create_router};
 use callmind_config::AppConfig;
 use callmind_core::JobKind;
 use callmind_db::{
-    CallRepository, JobRepository, SqliteCallRepository, SqliteJobRepository, create_sqlite_pool,
-    run_migrations,
+    CallRepository, JobRepository, SqlCallRepository, SqlJobRepository, SqlStatsRepository,
+    connect, run_migrations_on,
 };
+use callmind_diarization::DiarizationEngine;
 use callmind_jobs::{CallPipelineHandler, JobRegistry, WorkerPool};
+use callmind_language::LanguageEngine;
 use callmind_storage::FilesystemStorage;
 use callmind_vad::VadEngine;
 
@@ -58,19 +67,25 @@ enum Commands {
         #[arg(short, long)]
         limit: Option<usize>,
     },
-    /// Run performance benchmarks (decoding, VAD, resampling) on a directory of calls
+    /// Run performance benchmarks on a directory of calls
     Benchmark {
         /// Path to directory containing audio benchmark files
         path: PathBuf,
         /// Maximum number of files to benchmark
         #[arg(short, long)]
         limit: Option<usize>,
+        /// Also benchmark the expensive stages: LID, diarization and STT.
+        /// Requires the model weights from `callmind models download all`.
+        #[arg(long)]
+        full: bool,
     },
     /// Re-run the full intelligence processing pipeline on an existing call
     Reprocess {
         /// Call UUID identifier to reprocess
         call_id: String,
     },
+    /// Fill in missing audio duration and format for already-processed calls
+    Backfill,
     /// Display version and build information
     Version,
 }
@@ -88,8 +103,11 @@ async fn main() -> Result<()> {
             models_cli::run_models_command(&config.models.models_dir, command).await
         }
         Commands::Import { path, limit } => run_import(cli.config, path, limit).await,
-        Commands::Benchmark { path, limit } => run_benchmark(path, limit).await,
+        Commands::Benchmark { path, limit, full } => {
+            run_benchmark(cli.config, path, limit, full).await
+        }
         Commands::Reprocess { call_id } => run_reprocess(cli.config, call_id).await,
+        Commands::Backfill => run_backfill(cli.config).await,
         Commands::Version => run_version(),
     }
 }
@@ -103,22 +121,23 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
             .context("Failed to load configuration")?,
     );
 
-    // Validate and Initialize Database
-    let pool = match config.database.driver.to_lowercase().as_str() {
-        "sqlite" => create_sqlite_pool(&config.database.url, config.database.max_connections)
-            .await
-            .context("Failed to connect to SQLite database")?,
-        other => anyhow::bail!(
-            "Unsupported database driver: '{other}'. Only 'sqlite' is currently supported."
-        ),
-    };
+    // One connection for whichever backend the config names. Every repository
+    // builds its SQL with sea-query, so nothing below this line knows or cares.
+    let db = connect(
+        &config.database.driver,
+        &config.database.url,
+        config.database.max_connections,
+    )
+    .await
+    .context("Failed to connect to the database")?;
 
-    run_migrations(&pool)
+    run_migrations_on(&db)
         .await
         .context("Failed to apply database migrations")?;
 
-    let call_repo = Arc::new(SqliteCallRepository::new(pool.clone()));
-    let job_repo = Arc::new(SqliteJobRepository::new(pool.clone()));
+    let call_repo = Arc::new(SqlCallRepository::new(db.clone()));
+    let job_repo = Arc::new(SqlJobRepository::new(db.clone()));
+    let stats_repo = Arc::new(SqlStatsRepository::new(db.clone()));
 
     // Validate and Initialize Recording Storage
     let storage: Arc<dyn callmind_storage::RecordingStorage> =
@@ -172,7 +191,13 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
                         },
                     )
                     .collect(),
-                Err(_) => Vec::new(),
+                Err(e) => {
+                    // Swallowing this made a missing Whisper model look like
+                    // "no languages detected", and the analyzer then defaults
+                    // the language to Hebrew — silently mistranscribing.
+                    warn!("Acoustic language probe failed: {e}");
+                    Vec::new()
+                }
             }
         }),
     );
@@ -184,10 +209,38 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         .models
         .models_dir
         .join("diarization/speaker_embedding.onnx");
-    let clustering_diarizer = Arc::new(callmind_diarization::NeuralDiarizer::new_with_fallback(
+    let mut neural_diarizer = callmind_diarization::NeuralDiarizer::new_with_fallback(
         Some(onnx_diarization_model),
         vad.clone(),
-    ));
+    );
+
+    // Speaker segmentation, if the model has been exported. It is what lets the
+    // speaker count come from the audio instead of a two-party assumption --
+    // measured on labelled recordings at 4/4 monologues and 23/24 two-party
+    // calls, against 0/4 and 24/24 for the assumption. Absent, everything works
+    // as before. See scripts/export_pyannote_segmentation.py.
+    let segmentation_model = config
+        .models
+        .models_dir
+        .join("diarization/segmentation.onnx");
+    if segmentation_model.exists() {
+        match callmind_diarization::pyannote::PyannoteSegmenter::load(&segmentation_model) {
+            Ok(segmenter) => {
+                info!(
+                    "Loaded pyannote speaker segmentation from {}; the speaker count \
+                     will be measured rather than assumed",
+                    segmentation_model.display()
+                );
+                neural_diarizer = neural_diarizer.with_segmenter(Arc::new(segmenter));
+            }
+            Err(e) => warn!(
+                "Failed to load speaker segmentation from {}: {e}. Falling back to the \
+                 two-party prior.",
+                segmentation_model.display()
+            ),
+        }
+    }
+    let clustering_diarizer = Arc::new(neural_diarizer);
 
     let gpu_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
     let transcriber = Arc::new(callmind_transcript::AudioTranscriber::new(
@@ -199,7 +252,8 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         gpu_semaphore,
     ));
 
-    let search_engine = Arc::new(callmind_search::SearchEngine::new(pool.clone()));
+    let search_index = Arc::new(callmind_db::SqlSearchIndex::new(db.clone()));
+    let search_engine = Arc::new(callmind_search::SearchEngine::new(search_index));
     let llm_engine = callmind_llm::create_llm_engine(&config.llm);
     let ask_engine = Arc::new(callmind_search::AskEngine::new(
         (*search_engine).clone(),
@@ -213,8 +267,7 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         storage: storage.clone(),
         transcriber,
         analyzer: analysis_engine.clone(),
-        search_engine: search_engine.clone(),
-        pool: pool.clone(),
+        search: search_engine.clone(),
     };
 
     // Initialize Job Registry & Worker Pool
@@ -225,17 +278,15 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
 
     let mut worker_pool = WorkerPool::new(
         job_repo.clone(),
+        call_repo.clone(),
         registry,
         config.jobs.clone(),
         cancellation_token.clone(),
-    )
-    .with_pool(pool.clone());
+    );
 
     worker_pool.start();
 
-    let default_org_id = callmind_core::OrgId(
-        uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
-    );
+    let default_org_id = callmind_core::OrgId::DEFAULT;
 
     // Start background directory watcher if enabled in config
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -257,21 +308,46 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         call_repo.clone(),
         job_repo.clone(),
         storage.clone(),
-        pool.clone(),
+        cancellation_token.clone(),
     );
 
     // Initialize REST API State and Router
-    let shutdown_pool = pool.clone();
+    // Runtime HTML templates. A plugin registers its own view here at startup;
+    // built-in views are compiled in but still rendered at runtime.
+    let templates = Arc::new(callmind_ui::templates::TemplateRegistry::new());
+
     let app_state = AppState::new(
         config.clone(),
-        call_repo,
-        job_repo,
+        call_repo.clone(),
+        job_repo.clone(),
+        stats_repo,
         storage,
         search_engine,
         ask_engine,
         analysis_engine,
-        pool,
+        templates,
     );
+    // Remote worker gRPC listener, on its own port. The contract lives in
+    // callmind-worker-proto; workers never touch the database.
+    if config.workers.enabled {
+        let grpc_addr: std::net::SocketAddr = config
+            .workers
+            .bind
+            .parse()
+            .context(format!("Invalid workers.bind: {}", config.workers.bind))?;
+        let service = callmind_api::grpc::WorkerService::new(app_state.clone());
+        let grpc_token = cancellation_token.clone();
+        info!("CallMind worker gRPC listening on {grpc_addr}");
+        tokio::spawn(async move {
+            let server = tonic::transport::Server::builder()
+                .add_service(callmind_worker_proto::WorkerServer::new(service))
+                .serve_with_shutdown(grpc_addr, async move { grpc_token.cancelled().await });
+            if let Err(e) = server.await {
+                error!("Worker gRPC server stopped: {e}");
+            }
+        });
+    }
+
     let app = create_router(app_state);
 
     let listener = tokio::net::TcpListener::bind(&config.server.bind)
@@ -294,10 +370,26 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     });
 
     // Wait for shutdown signal (Ctrl+C / SIGTERM)
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received SIGINT shutdown signal");
+    #[cfg(unix)]
+    {
+        // `docker stop` sends SIGTERM. Without this branch the default handler
+        // killed the process instantly and the requeue block below — the whole
+        // point of the job leasing design — never ran.
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("Failed to install SIGTERM handler")?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received SIGINT shutdown signal");
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM shutdown signal");
+            }
         }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("Received SIGINT shutdown signal");
     }
 
     info!("Initiating graceful shutdown...");
@@ -305,7 +397,12 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     cancellation_token.cancel();
     server_handle.abort();
 
-    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+    // Deliberately shorter than any sane container stop grace period. Workers
+    // blocked inside `spawn_blocking` (STT, diarization) cannot be cancelled, so
+    // waiting longer does not help them finish — it only risks SIGKILL arriving
+    // before the requeue below runs, which is what happened against Docker's
+    // 10s default.
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
     if tokio::time::timeout(SHUTDOWN_TIMEOUT, worker_pool.wait())
         .await
         .is_err()
@@ -315,45 +412,22 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
             SHUTDOWN_TIMEOUT.as_secs()
         );
 
-        let now = chrono::Utc::now().to_rfc3339();
-        let requeued = sqlx::query(
-            r#"
-            UPDATE jobs
-            SET status = 'pending',
-                attempt = MAX(attempt - 1, 0),
-                run_after = ?,
-                locked_at = NULL,
-                locked_by = NULL,
-                last_error = 'Interrupted by server shutdown',
-                completed_at = NULL
-            WHERE status = 'running'
-            "#,
-        )
-        .bind(&now)
-        .execute(&shutdown_pool)
-        .await
-        .map(|result| result.rows_affected())
-        .unwrap_or_else(|err| {
-            error!("Failed to return active jobs to the queue: {err}");
-            0
-        });
-
-        if let Err(err) = sqlx::query(
-            r#"
-            UPDATE calls
-            SET processing_status = 'pending', updated_at = ?
-            WHERE processing_status = 'processing'
-              AND id IN (SELECT call_id FROM jobs WHERE status = 'pending')
-            "#,
-        )
-        .bind(&now)
-        .execute(&shutdown_pool)
-        .await
+        match job_repo
+            .requeue_all_running("Interrupted by server shutdown")
+            .await
         {
-            error!("Failed to reset interrupted calls to pending: {err}");
+            Ok(0) => {}
+            Ok(count) => info!("Requeued {count} interrupted job(s) for the next start"),
+            Err(err) => error!("Failed to requeue interrupted jobs: {err}"),
         }
 
-        info!("Requeued {requeued} active job(s); forcing process exit.");
+        match call_repo.reset_processing_to_pending().await {
+            Ok(0) => {}
+            Ok(count) => info!("Reset {count} interrupted call(s) to pending"),
+            Err(err) => error!("Failed to reset interrupted calls: {err}"),
+        }
+
+        info!("Forcing process exit after returning interrupted work to the queue.");
         std::process::exit(0);
     }
 
@@ -367,8 +441,8 @@ async fn run_migrate(config_path: Option<PathBuf>) -> Result<()> {
     info!("Running CallMind database migrations...");
 
     let config = AppConfig::load_from_file_or_default(config_path)?;
-    let pool = create_sqlite_pool(&config.database.url, 2).await?;
-    run_migrations(&pool).await?;
+    let db = connect(&config.database.driver, &config.database.url, 2).await?;
+    run_migrations_on(&db).await?;
 
     println!("All database migrations applied successfully.");
     Ok(())
@@ -389,10 +463,13 @@ async fn run_doctor(config_path: Option<PathBuf>) -> Result<()> {
     };
 
     // Check Database
-    match create_sqlite_pool(&config.database.url, 2).await {
-        Ok(pool) => {
-            println!("[✓] SQLite database connected ({})", config.database.url);
-            match run_migrations(&pool).await {
+    match connect(&config.database.driver, &config.database.url, 2).await {
+        Ok(db) => {
+            println!(
+                "[✓] {} database connected ({})",
+                config.database.driver, config.database.url
+            );
+            match run_migrations_on(&db).await {
                 Ok(()) => println!("[✓] Database migrations up to date"),
                 Err(e) => println!("[✗] Migration error: {e}"),
             }
@@ -442,16 +519,14 @@ async fn run_import(
     println!("Scanning directory: {:?}", import_path);
 
     let config = AppConfig::load_from_file_or_default(config_path)?;
-    let pool = create_sqlite_pool(&config.database.url, 4).await?;
-    run_migrations(&pool).await?;
+    let db = connect(&config.database.driver, &config.database.url, 4).await?;
+    run_migrations_on(&db).await?;
 
-    let call_repo = Arc::new(SqliteCallRepository::new(pool.clone()));
-    let job_repo = Arc::new(SqliteJobRepository::new(pool));
+    let call_repo = Arc::new(SqlCallRepository::new(db.clone()));
+    let job_repo = Arc::new(SqlJobRepository::new(db.clone()));
     let storage = Arc::new(FilesystemStorage::new(&config.storage.path).await?);
 
-    let org_id = callmind_core::OrgId(
-        uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
-    );
+    let org_id = callmind_core::OrgId::DEFAULT;
 
     let start_time = std::time::Instant::now();
     let summary = callmind_audio::BatchImporter::import_directory(
@@ -492,9 +567,23 @@ async fn run_import(
     Ok(())
 }
 
-async fn run_benchmark(benchmark_path: PathBuf, limit: Option<usize>) -> Result<()> {
+async fn run_benchmark(
+    config_path: Option<PathBuf>,
+    benchmark_path: PathBuf,
+    limit: Option<usize>,
+    full: bool,
+) -> Result<()> {
+    init_tracing();
     println!("=== CallMind Audio Performance Benchmark ===");
     println!("Benchmark Directory: {:?}", benchmark_path);
+    println!(
+        "Mode: {}",
+        if full {
+            "full pipeline (decode, resample, VAD, LID, diarization, STT)"
+        } else {
+            "audio only (decode, resample, VAD)"
+        }
+    );
 
     if !benchmark_path.is_dir() {
         anyhow::bail!("Benchmark directory {:?} does not exist", benchmark_path);
@@ -521,11 +610,66 @@ async fn run_benchmark(benchmark_path: PathBuf, limit: Option<usize>) -> Result<
 
     let vad = callmind_vad::EnergyVadEngine::default();
 
+    // Heavy stages are opt-in: they need the model weights on disk.
+    let heavy = if full {
+        let config = AppConfig::load_from_file_or_default(config_path)
+            .context("Failed to load configuration")?;
+        let models_dir = &config.models.models_dir;
+
+        let shared_vad: Arc<dyn VadEngine> = Arc::new(callmind_vad::EnergyVadEngine::default());
+        let hebrew_stt = Arc::new(callmind_stt::WhisperCppEngine::new(
+            models_dir.join("stt/ivrit-ai-large-v3-turbo.bin"),
+            "ivrit-ai-turbo",
+            "1.0",
+        ));
+        let multi_stt = Arc::new(callmind_stt::WhisperCppEngine::new(
+            models_dir.join("stt/whisper-large-v3.bin"),
+            "whisper-large-v3",
+            "1.0",
+        ));
+        let stt_router = callmind_stt::SttRouter::new(hebrew_stt, multi_stt.clone(), 0.90);
+
+        let multi_stt_for_lid = multi_stt.clone();
+        let language_engine =
+            callmind_language::SamplingLanguageEngine::new().with_detector(move |buf| {
+                match multi_stt_for_lid.detect_language_probe(buf) {
+                    Ok(probs) => probs
+                        .into_iter()
+                        .map(
+                            |(language, probability)| callmind_language::LanguageProbability {
+                                language,
+                                probability,
+                            },
+                        )
+                        .collect(),
+                    Err(e) => {
+                        warn!("Acoustic language probe failed: {e}");
+                        Vec::new()
+                    }
+                }
+            });
+
+        let diarizer = callmind_diarization::NeuralDiarizer::new_with_fallback(
+            Some(models_dir.join("diarization/speaker_embedding.onnx")),
+            shared_vad,
+        );
+        Some((stt_router, language_engine, diarizer))
+    } else {
+        None
+    };
+
+    let mut total_lid_secs = 0.0;
+    let mut total_diar_secs = 0.0;
+    let mut total_stt_secs = 0.0;
+    let mut total_speakers = 0usize;
+    let mut total_words = 0usize;
+
     let mut total_audio_secs = 0.0;
     let mut total_decode_secs = 0.0;
     let mut total_resample_secs = 0.0;
     let mut total_vad_secs = 0.0;
     let mut total_speech_regions = 0;
+    let mut total_speech_secs = 0.0;
 
     for file in entries.into_iter().take(count) {
         // 1. Decode benchmark
@@ -555,12 +699,77 @@ async fn run_benchmark(benchmark_path: PathBuf, limit: Option<usize>) -> Result<
         let vad_elapsed = t2.elapsed().as_secs_f64();
         total_vad_secs += vad_elapsed;
         total_speech_regions += regions.len();
+        total_speech_secs += regions
+            .iter()
+            .map(|r| r.duration_ms() as f64 / 1000.0)
+            .sum::<f64>();
+
+        let Some((stt_router, language_engine, diarizer)) = heavy.as_ref() else {
+            continue;
+        };
+
+        // 4. Language identification
+        let t3 = std::time::Instant::now();
+        let detection = match language_engine.detect(&resampled, &regions).await {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("LID failed for {:?}: {e}", file.file_name());
+                continue;
+            }
+        };
+        let lid_elapsed = t3.elapsed().as_secs_f64();
+        total_lid_secs += lid_elapsed;
+
+        // 5. Diarization (ONNX embeddings + agglomerative clustering)
+        let t4 = std::time::Instant::now();
+        let diar = diarizer
+            .diarize(callmind_diarization::DiarizationRequest::new(&resampled))
+            .await;
+        let diar_elapsed = t4.elapsed().as_secs_f64();
+        total_diar_secs += diar_elapsed;
+        let speakers = diar.as_ref().map_or(0, |d| d.speakers);
+        total_speakers += speakers;
+
+        // 6. Speech-to-text
+        let t5 = std::time::Instant::now();
+        let stt = stt_router
+            .transcribe_routed(&resampled, &detection, &[])
+            .await;
+        let stt_elapsed = t5.elapsed().as_secs_f64();
+        total_stt_secs += stt_elapsed;
+        let words = stt.as_ref().map_or(0, |(r, _)| r.words.len());
+        total_words += words;
+
+        println!(
+            "  {:>6.0}s audio | decode {:>5.2} | vad {:>4.2} | lid {:>5.2} | diar {:>6.2} | stt {:>7.2} | {} spk, {} words | {}",
+            audio_dur,
+            decode_elapsed,
+            vad_elapsed,
+            lid_elapsed,
+            diar_elapsed,
+            stt_elapsed,
+            speakers,
+            words,
+            file.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+        );
     }
 
-    let total_proc_secs = total_decode_secs + total_resample_secs + total_vad_secs;
+    let total_proc_secs = total_decode_secs
+        + total_resample_secs
+        + total_vad_secs
+        + total_lid_secs
+        + total_diar_secs
+        + total_stt_secs;
     let rtf = total_proc_secs / total_audio_secs.max(0.001);
 
     println!("\n=== Benchmark Results ===");
+    if full {
+        // Worth stating: `serve` runs diarization and STT concurrently via
+        // `tokio::try_join!`, so the real pipeline is faster than the sum below.
+        // Measured on a 42.9-minute call: 337s end to end against 526s of stages
+        // added up.
+        println!("(stages are timed sequentially; the pipeline overlaps diarization and STT)");
+    }
     println!(
         "Total Audio Processed: {:.2} minutes ({:.1} seconds)",
         total_audio_secs / 60.0,
@@ -582,13 +791,111 @@ async fn run_benchmark(benchmark_path: PathBuf, limit: Option<usize>) -> Result<
         total_vad_secs,
         total_vad_secs / total_audio_secs.max(0.001)
     );
-    println!("Speech Regions Found:  {}", total_speech_regions);
+    if full {
+        let per = |secs: f64| secs / total_audio_secs.max(0.001);
+        println!(
+            "  - Language ID:       {:.3}s (RTF: {:.4})",
+            total_lid_secs,
+            per(total_lid_secs)
+        );
+        println!(
+            "  - Diarization:       {:.3}s (RTF: {:.4})",
+            total_diar_secs,
+            per(total_diar_secs)
+        );
+        println!(
+            "  - Speech-to-text:    {:.3}s (RTF: {:.4})",
+            total_stt_secs,
+            per(total_stt_secs)
+        );
+        println!("Speakers Detected:     {}", total_speakers);
+        println!("Words Transcribed:     {}", total_words);
+    }
+    println!(
+        "Speech Regions Found:  {} ({:.1}s speech, {:.0}% of audio)",
+        total_speech_regions,
+        total_speech_secs,
+        100.0 * total_speech_secs / total_audio_secs.max(0.001)
+    );
+    // Diarization clusters one embedding per 400ms hop across speech.
+    println!("Diarization Windows:   ~{:.0}", total_speech_secs / 0.4);
     println!(
         "Overall Real-Time Factor (RTF): {:.4} (Speedup: {:.1}x realtime)",
         rtf,
         1.0 / rtf.max(0.0001)
     );
 
+    Ok(())
+}
+
+/// Fill in `duration_ms` for calls processed before it was recorded.
+///
+/// Reads the container header rather than decoding -- 183 ms and 7 MB against
+/// 1.3 s and 504 MB for a 43-minute file -- so this is not a re-transcription.
+/// Nothing else about the call is touched.
+async fn run_backfill(config_path: Option<PathBuf>) -> Result<()> {
+    init_tracing();
+    println!("=== CallMind Metadata Backfill ===");
+
+    let config = AppConfig::load_from_file_or_default(config_path)?;
+    let db = connect(&config.database.driver, &config.database.url, 4).await?;
+    run_migrations_on(&db).await?;
+    let call_repo = SqlCallRepository::new(db);
+    let storage: Arc<dyn callmind_storage::RecordingStorage> =
+        Arc::new(FilesystemStorage::new(&config.storage.path).await?);
+
+    let mut offset = 0u32;
+    let (mut filled, mut skipped) = (0usize, 0usize);
+    loop {
+        let page = call_repo
+            .list(&callmind_core::CallFilter {
+                limit: Some(500),
+                offset: Some(offset),
+                ..Default::default()
+            })
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        offset += page.len() as u32;
+
+        for call in page {
+            if call.duration_ms.is_some() {
+                continue;
+            }
+            let Some(recording) = call_repo.get_recording_by_call_id(call.id).await? else {
+                skipped += 1;
+                continue;
+            };
+            let path = match storage.get_local_path(&recording.storage_key).await {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("Call {}: recording unavailable ({e})", call.id);
+                    skipped += 1;
+                    continue;
+                }
+            };
+            match callmind_audio::AudioDecoder::read_metadata(&path) {
+                Ok(Some(meta)) => {
+                    call_repo
+                        .set_audio_metadata(
+                            call.id,
+                            meta.duration_ms,
+                            meta.channels,
+                            meta.sample_rate,
+                        )
+                        .await?;
+                    filled += 1;
+                }
+                Ok(None) | Err(_) => {
+                    warn!("Call {}: could not read audio metadata", call.id);
+                    skipped += 1;
+                }
+            }
+        }
+    }
+
+    println!("Filled: {filled}   Skipped: {skipped}");
     Ok(())
 }
 
@@ -601,11 +908,11 @@ async fn run_reprocess(config_path: Option<PathBuf>, call_id_str: String) -> Res
     println!("Target Call ID: {}", call_id);
 
     let config = AppConfig::load_from_file_or_default(config_path)?;
-    let pool = create_sqlite_pool(&config.database.url, 4).await?;
-    run_migrations(&pool).await?;
+    let db = connect(&config.database.driver, &config.database.url, 4).await?;
+    run_migrations_on(&db).await?;
 
-    let call_repo = Arc::new(SqliteCallRepository::new(pool.clone()));
-    let job_repo = Arc::new(SqliteJobRepository::new(pool));
+    let call_repo = Arc::new(SqlCallRepository::new(db.clone()));
+    let job_repo = Arc::new(SqlJobRepository::new(db.clone()));
 
     let _ = call_repo
         .get_by_id(call_id)
