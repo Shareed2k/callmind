@@ -269,8 +269,18 @@ async fn test_full_pipeline_e2e_real_audio() {
 
     worker_pool.start();
 
-    // Wait for worker to finish processing
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_until("the pipeline to finish the call", || async {
+        matches!(
+            call_repo
+                .get_by_id(call.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .processing_status,
+            ProcessingStatus::Completed | ProcessingStatus::Failed
+        )
+    })
+    .await;
 
     cancellation_token.cancel();
     worker_pool.wait().await;
@@ -340,15 +350,39 @@ async fn test_full_pipeline_e2e_real_audio() {
         let registry = make_registry();
         let jobs_config = jobs_config.clone();
         async move {
+            // Reset first: the call is already `Completed` from the run above,
+            // so without this the wait below would return before the re-run
+            // had done anything.
+            call_repo
+                .update_status(call.id, ProcessingStatus::Pending)
+                .await
+                .unwrap();
+
             let req = callmind_core::EnqueueJob::new(JobKind::IngestRecording, payload)
                 .with_call_id(call.id);
             job_repo.enqueue(&req).await.unwrap();
 
             let token = CancellationToken::new();
-            let mut pool_2 =
-                WorkerPool::new(job_repo, call_repo, registry, jobs_config, token.clone());
+            let mut pool_2 = WorkerPool::new(
+                job_repo,
+                call_repo.clone(),
+                registry,
+                jobs_config,
+                token.clone(),
+            );
             pool_2.start();
-            tokio::time::sleep(Duration::from_millis(800)).await;
+            wait_until("the re-run to finish the call", || async {
+                matches!(
+                    call_repo
+                        .get_by_id(call.id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .processing_status,
+                    ProcessingStatus::Completed | ProcessingStatus::Failed
+                )
+            })
+            .await;
             token.cancel();
             pool_2.wait().await;
         }
@@ -380,4 +414,29 @@ async fn test_full_pipeline_e2e_real_audio() {
         Some(marker),
         "force_retranscribe must replace the stored transcript"
     );
+}
+
+/// Poll until `condition` holds instead of assuming a fixed sleep is enough.
+///
+/// A loaded CI runner is slower than a laptop: the 500 ms this replaced was
+/// enough on a pull request and not enough on the release build minutes later,
+/// where the assertion read `Pending` and blocked the tag from publishing.
+async fn wait_until<F, Fut>(what: &str, mut condition: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    const DEADLINE: Duration = Duration::from_secs(60);
+
+    let start = std::time::Instant::now();
+    loop {
+        if condition().await {
+            return;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "timed out after {DEADLINE:?} waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }

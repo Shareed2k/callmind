@@ -66,10 +66,10 @@ async fn test_worker_pool_executes_job_and_shuts_down() {
 
     worker_pool.start();
 
-    // Wait a bit for workers to process
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    assert_eq!(executed_count.load(Ordering::SeqCst), 3);
+    wait_until("all three jobs to run", || async {
+        executed_count.load(Ordering::SeqCst) == 3
+    })
+    .await;
 
     // Test graceful shutdown
     cancellation_token.cancel();
@@ -141,13 +141,10 @@ async fn test_handler_panic_does_not_kill_the_worker() {
     }
 
     worker_pool.start();
-    tokio::time::sleep(Duration::from_millis(600)).await;
-
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        3,
-        "the worker stopped picking up jobs after the panic"
-    );
+    wait_until("the worker to pick up all three jobs", || async {
+        calls.load(Ordering::SeqCst) == 3
+    })
+    .await;
     assert_eq!(
         completed.load(Ordering::SeqCst),
         2,
@@ -156,4 +153,29 @@ async fn test_handler_panic_does_not_kill_the_worker() {
 
     cancellation_token.cancel();
     worker_pool.wait().await;
+}
+
+/// Poll until `condition` holds instead of assuming a fixed sleep is enough.
+///
+/// A loaded CI runner is slower than a laptop: the 500 ms this replaced was
+/// enough on a pull request and not enough on the release build minutes later,
+/// where the assertion read `Pending` and blocked the tag from publishing.
+async fn wait_until<F, Fut>(what: &str, mut condition: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    const DEADLINE: Duration = Duration::from_secs(60);
+
+    let start = std::time::Instant::now();
+    loop {
+        if condition().await {
+            return;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "timed out after {DEADLINE:?} waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
