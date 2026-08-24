@@ -4,7 +4,7 @@
 
 **High-Performance Autonomous Conversation Intelligence Platform**
 
-[![CI](https://github.com/callmind/callmind/actions/workflows/ci.yml/badge.svg)](https://github.com/callmind/callmind/actions/workflows/ci.yml)
+[![CI](https://github.com/Shareed2k/callmind/actions/workflows/ci.yml/badge.svg)](https://github.com/Shareed2k/callmind/actions/workflows/ci.yml)
 [![Rust Version](https://img.shields.io/badge/rust-1.94%2B-blue.svg)](https://www.rust-lang.org)
 [![Edition](https://img.shields.io/badge/edition-2024-purple.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/index.html)
 [![Acceleration](https://img.shields.io/badge/GPU-Metal%20%7C%20Vulkan%20%7C%20CUDA-green.svg)](#hardware-acceleration)
@@ -81,21 +81,26 @@ CallMind supports hardware acceleration across all major platforms:
 | **Linux (Nvidia GPU)** | `cuda` | 🚀 **Nvidia RTX / Tesla / A100 / H100** (Tensor Cores) |
 | **Linux / Server (Universal)** | `cpu` | ⚡ Any x86_64 or ARM64 CPU (AVX2 / FMA / NEON) |
 
+Which of these you get prebuilt is narrower than what builds from source. Release
+archives are macOS arm64, Linux x86_64 CPU and Linux x86_64 Vulkan; the Docker
+images are linux/amd64. CUDA ships only as an image, and ARM64 Linux only as a
+source build.
+
 ---
 
 ## 📦 Quickstart
 
 ### Option 1: Pre-built Release Binaries
 
-Download the binary for your platform from [GitHub Releases](https://github.com/callmind/callmind/releases):
+Download the binary for your platform from [GitHub Releases](https://github.com/Shareed2k/callmind/releases):
 
 ```bash
 # macOS (Apple Silicon M-series)
-curl -L -o callmind.tar.gz https://github.com/callmind/callmind/releases/latest/download/callmind-macos-arm64.tar.gz
+curl -L -o callmind.tar.gz https://github.com/Shareed2k/callmind/releases/latest/download/callmind-macos-arm64.tar.gz
 tar -xzf callmind.tar.gz
 
 # Linux (x86_64 CPU)
-curl -L -o callmind.tar.gz https://github.com/callmind/callmind/releases/latest/download/callmind-linux-x86_64.tar.gz
+curl -L -o callmind.tar.gz https://github.com/Shareed2k/callmind/releases/latest/download/callmind-linux-x86_64.tar.gz
 tar -xzf callmind.tar.gz
 ```
 
@@ -105,7 +110,7 @@ Ensure you have Rust 1.94+ and `libopus` installed (`brew install opus` on macOS
 
 ```bash
 # Clone the repository
-git clone https://github.com/callmind/callmind.git
+git clone https://github.com/Shareed2k/callmind.git
 cd callmind
 
 # Build optimized release binary (default uses Apple Metal on macOS)
@@ -228,9 +233,9 @@ curl -X POST "http://localhost:8080/api/v1/bots/webhook?sync=true" \
 ## 🐳 Docker & Docker Compose
 
 Pre-built Docker images are automatically published to **GitHub Container Registry (GHCR)**:
-- `ghcr.io/callmind/callmind:latest` (Universal CPU)
-- `ghcr.io/callmind/callmind:vulkan` (AMD Radeon, Intel Arc, Nvidia Vulkan GPU)
-- `ghcr.io/callmind/callmind:cuda` (Nvidia CUDA Tensor Core GPU)
+- `ghcr.io/shareed2k/callmind:latest` (Universal CPU)
+- `ghcr.io/shareed2k/callmind:vulkan` (AMD Radeon, Intel Arc, Nvidia Vulkan GPU)
+- `ghcr.io/shareed2k/callmind:cuda` (Nvidia CUDA Tensor Core GPU)
 
 Run with Docker Compose:
 

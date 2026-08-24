@@ -217,6 +217,9 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         &multi_label,
         "1.0",
     ));
+    // Kept so shutdown can release the GPU weights; see `release_stt_weights`.
+    let stt_engines = vec![hebrew_stt.clone(), multi_stt.clone()];
+
     let stt_router = Arc::new(callmind_stt::SttRouter::new(
         hebrew_stt,
         multi_stt.clone(),
@@ -483,11 +486,18 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     cancellation_token.cancel();
     server_handle.abort();
 
-    // Deliberately shorter than any sane container stop grace period. Workers
-    // blocked inside `spawn_blocking` (STT, diarization) cannot be cancelled, so
-    // waiting longer does not help them finish — it only risks SIGKILL arriving
-    // before the requeue below runs, which is what happened against Docker's
-    // 10s default.
+    // Transcription is the one blocking stage that can be told to stop: whisper
+    // polls this between decoder steps. Without it a call in flight ran to
+    // completion while shutdown gave up waiting, and the process aborted on the
+    // Metal backend's exit assert instead of stopping.
+    for engine in &stt_engines {
+        engine.request_abort();
+    }
+
+    // Deliberately shorter than any sane container stop grace period. Diarization
+    // still cannot be cancelled inside `spawn_blocking`, so waiting longer does
+    // not help it finish — it only risks SIGKILL arriving before the requeue
+    // below runs, which is what happened against Docker's 10s default.
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
     if tokio::time::timeout(SHUTDOWN_TIMEOUT, worker_pool.wait())
         .await
@@ -513,9 +523,13 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
             Err(err) => error!("Failed to reset interrupted calls: {err}"),
         }
 
+        release_stt_weights(&stt_engines);
+
         info!("Forcing process exit after returning interrupted work to the queue.");
         std::process::exit(0);
     }
+
+    release_stt_weights(&stt_engines);
 
     info!("CallMind Server stopped cleanly.");
 
@@ -1057,6 +1071,20 @@ fn init_tracing_with(format: callmind_config::LogFormat) {
             )
             .try_init(),
     };
+}
+
+/// Drop the loaded Whisper weights before the process goes away.
+///
+/// The Metal backend asserts at exit if its resources are still alive, and the
+/// shutdown path calls `std::process::exit`, which runs no destructors: killing
+/// the server mid-inference aborted with
+/// `GGML_ASSERT([rsets->data count] == 0)` and exit code 134.
+fn release_stt_weights(engines: &[Arc<callmind_stt::WhisperCppEngine>]) {
+    for engine in engines {
+        if engine.unload() {
+            info!("Released Whisper weights held by the speech-to-text engine");
+        }
+    }
 }
 
 /// A missing weights file otherwise surfaces as a failed job on the first call,

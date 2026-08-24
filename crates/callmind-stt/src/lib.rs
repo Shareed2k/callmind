@@ -6,6 +6,9 @@
 //! multi-gigabyte files and initialises the GPU backend.
 
 pub mod errors;
+/// Test doubles. Behind a feature so they are not linked into the server
+/// binary; integration tests in other crates turn it on via dev-dependencies.
+#[cfg(any(test, feature = "mock"))]
 pub mod mock;
 pub mod models;
 pub mod router;
@@ -13,6 +16,7 @@ pub mod traits;
 pub mod whisper;
 
 pub use errors::SttError;
+#[cfg(any(test, feature = "mock"))]
 pub use mock::MockSttEngine;
 pub use models::{ModelInfo, SttRequest, SttResult, SttWord};
 pub use router::{SttProfile, SttRouter};

@@ -21,3 +21,6 @@ tracing.workspace = true
 utoipa.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+callmind-llm = { workspace = true, features = ["mock"] }

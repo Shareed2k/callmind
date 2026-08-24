@@ -4,6 +4,7 @@ use crate::traits::SttEngine;
 use async_trait::async_trait;
 use callmind_core::Language;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
@@ -12,6 +13,8 @@ pub struct WhisperCppEngine {
     pub model_path: PathBuf,
     pub info: ModelInfo,
     cached_ctx: Arc<Mutex<Option<Arc<whisper_rs::WhisperContext>>>>,
+    /// Read by whisper.cpp between decoder steps; see [`Self::request_abort`].
+    aborting: Arc<AtomicBool>,
 }
 
 impl WhisperCppEngine {
@@ -25,11 +28,52 @@ impl WhisperCppEngine {
                 backend: "whisper.cpp (Metal/CUDA)".to_string(),
             },
             cached_ctx: Arc::new(Mutex::new(None)),
+            aborting: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Ask any running transcription to stop at the next decoder step.
+    ///
+    /// Inference runs inside `spawn_blocking`, which cannot be cancelled, so
+    /// shutdown used to give up waiting and call `std::process::exit` while a
+    /// transcription still held the GPU context. The Metal backend asserts on
+    /// exactly that -- `GGML_ASSERT([rsets->data count] == 0)`, exit code 134.
+    /// whisper.cpp polls an abort callback between steps, which is the way in.
+    ///
+    /// One-way: an engine asked to stop stays stopped, because the only caller
+    /// is shutdown.
+    pub fn request_abort(&self) {
+        self.aborting.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether a stop has been requested.
+    #[must_use]
+    pub fn is_aborting(&self) -> bool {
+        self.aborting.load(Ordering::Relaxed)
     }
 
     fn get_or_load_context(&self) -> Result<Arc<whisper_rs::WhisperContext>, SttError> {
         Self::load_context(&self.cached_ctx, &self.model_path)
+    }
+
+    /// Release the loaded weights and the GPU resources behind them.
+    ///
+    /// Nothing dropped the context before the process exited, and the Metal
+    /// backend asserts on that: killing the server mid-inference aborted with
+    /// `GGML_ASSERT([rsets->data count] == 0)` and exit code 134 instead of
+    /// shutting down. Clearing the cache here works however many clones of the
+    /// engine exist, because the cache is what owns the context.
+    ///
+    /// Returns whether weights were actually loaded. Call it once the workers
+    /// have stopped; a transcription still running holds its own reference and
+    /// keeps the context alive until it finishes.
+    pub fn unload(&self) -> bool {
+        match self.cached_ctx.lock() {
+            Ok(mut cached) => cached.take().is_some(),
+            // A poisoned lock means a panic during load; there is nothing to
+            // release and nothing useful to do about it at shutdown.
+            Err(_) => false,
+        }
     }
 
     /// Load (or return the cached) Whisper context.
@@ -115,6 +159,8 @@ impl WhisperCppEngine {
         params.set_print_timestamps(false);
         params.set_single_segment(true);
         params.set_max_len(1);
+        let aborting = self.aborting.clone();
+        params.set_abort_callback_safe(move || aborting.load(Ordering::Relaxed));
 
         state
             .full(params, &samples)
@@ -138,6 +184,7 @@ impl SttEngine for WhisperCppEngine {
         let lang_hint = request.language_hint.as_ref().map(|l| l.code().to_string());
         let cached_ctx = self.cached_ctx.clone();
         let model_path = self.model_path.clone();
+        let aborting_flag = self.aborting.clone();
 
         let result = tokio::task::spawn_blocking(move || -> Result<SttResult, SttError> {
             // Loaded here, not before the spawn: on a cold cache this reads the
@@ -168,6 +215,8 @@ impl SttEngine for WhisperCppEngine {
             params.set_print_progress(false);
             params.set_print_realtime(false);
             params.set_print_timestamps(false);
+            let aborting = aborting_flag.clone();
+            params.set_abort_callback_safe(move || aborting.load(Ordering::Relaxed));
 
             state
                 .full(params, &audio_samples)
@@ -317,5 +366,37 @@ impl SttEngine for WhisperCppEngine {
 
     fn info(&self) -> ModelInfo {
         self.info.clone()
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    /// Inference runs inside `spawn_blocking`, which cannot be cancelled, so the
+    /// server used to give up waiting and call `std::process::exit` while a
+    /// transcription still held the GPU context. The Metal backend asserts on
+    /// that: `GGML_ASSERT([rsets->data count] == 0)`, exit code 134. whisper.cpp
+    /// polls an abort callback between decoder steps, which is the only way in.
+    #[test]
+    fn an_engine_transcribes_until_it_is_asked_to_stop() {
+        let engine = WhisperCppEngine::new("models/stt/none.bin", "test", "1.0");
+        assert!(
+            !engine.is_aborting(),
+            "a fresh engine must not refuse to work"
+        );
+
+        engine.request_abort();
+
+        assert!(
+            engine.is_aborting(),
+            "the running inference has to be able to see the request"
+        );
+    }
+
+    #[test]
+    fn unloading_weights_that_were_never_loaded_is_harmless() {
+        let engine = WhisperCppEngine::new("models/stt/none.bin", "test", "1.0");
+        assert!(!engine.unload(), "nothing was loaded, so nothing was freed");
     }
 }

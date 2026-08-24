@@ -8,6 +8,9 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+mock = []
+
 [dependencies]
 callmind-core.workspace = true
 callmind-config.workspace = true
@@ -21,4 +24,5 @@ tokio.workspace = true
 reqwest.workspace = true
 
 [dev-dependencies]
+callmind-llm = { path = ".", features = ["mock"] }
 axum = { workspace = true }

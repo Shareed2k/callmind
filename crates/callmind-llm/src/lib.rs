@@ -6,6 +6,9 @@
 
 pub mod errors;
 pub mod local;
+/// Test doubles. Behind a feature so they are not linked into the server
+/// binary; integration tests in other crates turn it on via dev-dependencies.
+#[cfg(any(test, feature = "mock"))]
 pub mod mock;
 pub mod prompts;
 pub mod providers;
@@ -13,6 +16,7 @@ pub mod traits;
 
 pub use errors::LlmError;
 pub use local::LocalLlmEngine;
+#[cfg(any(test, feature = "mock"))]
 pub use mock::MockLlmEngine;
 pub use prompts::*;
 pub use providers::*;
