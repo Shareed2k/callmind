@@ -133,14 +133,6 @@ impl FromStr for JobStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum JobKind {
     IngestRecording,
-    DecodeAudio,
-    DetectLanguage,
-    Transcribe,
-    Diarize,
-    BuildTranscript,
-    NormalizeTranscript,
-    AnalyzeCall,
-    AnalyzeEmotions,
     DeliverWebhook,
     /// A stage supplied by a plugin, named by the plugin.
     Custom(String),
@@ -191,14 +183,6 @@ impl JobKind {
         use std::borrow::Cow;
         match self {
             Self::IngestRecording => Cow::Borrowed("ingest_recording"),
-            Self::DecodeAudio => Cow::Borrowed("decode_audio"),
-            Self::DetectLanguage => Cow::Borrowed("detect_language"),
-            Self::Transcribe => Cow::Borrowed("transcribe"),
-            Self::Diarize => Cow::Borrowed("diarize"),
-            Self::BuildTranscript => Cow::Borrowed("build_transcript"),
-            Self::NormalizeTranscript => Cow::Borrowed("normalize_transcript"),
-            Self::AnalyzeCall => Cow::Borrowed("analyze_call"),
-            Self::AnalyzeEmotions => Cow::Borrowed("analyze_emotions"),
             Self::DeliverWebhook => Cow::Borrowed("deliver_webhook"),
             Self::Custom(name) => Cow::Owned(format!("{PLUGIN_KIND_PREFIX}{name}")),
         }
@@ -223,14 +207,6 @@ impl FromStr for JobKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "ingest_recording" => Ok(Self::IngestRecording),
-            "decode_audio" => Ok(Self::DecodeAudio),
-            "detect_language" => Ok(Self::DetectLanguage),
-            "transcribe" => Ok(Self::Transcribe),
-            "diarize" => Ok(Self::Diarize),
-            "build_transcript" => Ok(Self::BuildTranscript),
-            "normalize_transcript" => Ok(Self::NormalizeTranscript),
-            "analyze_call" => Ok(Self::AnalyzeCall),
-            "analyze_emotions" => Ok(Self::AnalyzeEmotions),
             "deliver_webhook" => Ok(Self::DeliverWebhook),
             other => match other.strip_prefix(PLUGIN_KIND_PREFIX) {
                 // An empty plugin name is a bug at the registration site, not a
@@ -370,11 +346,7 @@ mod job_kind_custom_tests {
 
     #[test]
     fn built_in_kinds_still_round_trip() {
-        for kind in [
-            JobKind::IngestRecording,
-            JobKind::AnalyzeCall,
-            JobKind::DeliverWebhook,
-        ] {
+        for kind in [JobKind::IngestRecording, JobKind::DeliverWebhook] {
             let text = kind.as_str().to_string();
             assert_eq!(text.parse::<JobKind>().unwrap(), kind, "{text}");
         }
@@ -395,6 +367,29 @@ mod job_kind_custom_tests {
 
     /// Registry lookup is by value, so two plugin kinds with the same name must
     /// be the same key and different names must not be.
+    /// These named stages of a pipeline that was never split into stages: no
+    /// code enqueued them and no handler was ever registered, so enqueueing one
+    /// failed with "No handler registered". Retiring them keeps the enum to what
+    /// actually runs, and a plugin can claim any of the names via `plugin:`.
+    #[test]
+    fn retired_stage_kinds_no_longer_parse() {
+        for text in [
+            "decode_audio",
+            "detect_language",
+            "transcribe",
+            "diarize",
+            "build_transcript",
+            "normalize_transcript",
+            "analyze_call",
+            "analyze_emotions",
+        ] {
+            assert!(
+                text.parse::<JobKind>().is_err(),
+                "{text} should no longer be a built-in kind"
+            );
+        }
+    }
+
     #[test]
     fn plugin_kinds_compare_and_hash_by_name() {
         use std::collections::HashMap;

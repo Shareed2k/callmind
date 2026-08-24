@@ -278,6 +278,10 @@ jobs:
 
 models:
   models_dir: "./models"
+  # Speech-to-text weights, relative to models_dir. Transcription is ~89% of
+  # processing time, so this is the setting worth experimenting with.
+  stt_multilingual: "stt/whisper-large-v3-turbo.bin"
+  stt_hebrew: "stt/ivrit-ai-large-v3-turbo.bin"
 
 llm:
   provider: "ollama" # "ollama", "openai", "anthropic", "heuristic"
@@ -313,6 +317,17 @@ bots:
   webhook:
     enabled: true
     secret_token: null
+
+# POST each finished call to an HTTP receiver. Disabled while url is empty --
+# this is the one setting that sends call content off the machine. Delivery is a
+# queued job, so a receiver that is down costs a retry with backoff rather than a
+# re-run of transcription. The payload carries the call id, title, summary,
+# action items, key facts, topics, language and duration; deliberately no phone
+# numbers.
+outbound_webhook:
+  url: "" # or set CALLMIND_OUTBOUND_WEBHOOK_URL
+  secret: "" # sent as X-CallMind-Secret; or set CALLMIND_OUTBOUND_WEBHOOK_SECRET
+  timeout_seconds: 30
 ```
 
 ---

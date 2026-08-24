@@ -146,7 +146,7 @@ mod plugin_registration_tests {
     fn registered_kinds_reports_plugin_stages() {
         let registry = JobRegistry::builder()
             .register(
-                JobKind::AnalyzeCall,
+                JobKind::DeliverWebhook,
                 Counting(Arc::new(AtomicUsize::new(0))),
             )
             .register(
@@ -161,6 +161,6 @@ mod plugin_registration_tests {
             .map(|k| k.as_str().to_string())
             .collect();
         kinds.sort();
-        assert_eq!(kinds, vec!["analyze_call", "plugin:emotions"]);
+        assert_eq!(kinds, vec!["deliver_webhook", "plugin:emotions"]);
     }
 }

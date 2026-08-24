@@ -44,9 +44,10 @@ models:
   models_dir: "./models"
   # Speech-to-text weights, relative to models_dir. This is the stage that costs
   # 88.8% of processing time, so it is the one worth experimenting with:
-  #   stt/whisper-large-v3-turbo.bin  ~1.5 GB  (default) -- measured 2x faster
-  #     than the full model on two real Russian calls, with an identical
-  #     transcript on one and no repetition loop on the other.
+  #   stt/whisper-large-v3-turbo.bin  ~1.5 GB  (default) -- measured 2.2x and
+  #     2.9x faster than the full model on two real Russian calls, and the
+  #     better transcript on both: the full model lost speech into repetition
+  #     loops that turbo did not produce.
   #   stt/whisper-large-v3.bin        ~2.9 GB  (`models download whisper-large-v3`)
   #     the full model; try it if your language transcribes worse on turbo.
   stt_multilingual: "stt/whisper-large-v3-turbo.bin"
@@ -101,3 +102,15 @@ watcher:
   enabled: false
   watch_dir: "./incoming"
   poll_secs: 5
+
+# POST each finished call to an HTTP receiver (n8n, a Shortcut, anything that
+# speaks HTTP). Disabled while url is empty -- this is the one setting that sends
+# call content off the machine. Delivery is a queued job, so a receiver that is
+# down costs a retry with backoff, not a re-run of transcription.
+# Both fields also read CALLMIND_OUTBOUND_WEBHOOK_URL / _SECRET from the
+# environment, so the secret need not be written to disk.
+outbound_webhook:
+  url: ""
+  # Sent as X-CallMind-Secret so the receiver can tell the request is ours.
+  secret: ""
+  timeout_seconds: 30

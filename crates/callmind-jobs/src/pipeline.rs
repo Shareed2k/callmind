@@ -21,6 +21,10 @@ pub struct CallPipelineHandler {
     /// Voice prints. Its own trait because these are biometric data and the
     /// surface that touches them is worth keeping small.
     pub speaker_repo: Arc<dyn callmind_db::SpeakerRepository>,
+    /// Where to queue the outbound delivery of a finished call. `None` when no
+    /// receiver is configured, which is the default: nothing leaves the machine
+    /// unless somebody asked for it.
+    pub webhook_queue: Option<Arc<dyn callmind_db::JobRepository>>,
     pub storage: Arc<dyn RecordingStorage>,
     pub transcriber: Arc<AudioTranscriber>,
     pub analyzer: Arc<AnalysisEngine>,
@@ -399,6 +403,38 @@ impl JobHandler for CallPipelineHandler {
             })
             .await
             .map_err(|e| JobExecutionError::Retryable(format!("Failed to write FTS index: {e}")))?;
+
+        // 6. Hand the finished call to the outbound webhook, if one is configured.
+        //
+        // Deliberately carries no phone numbers: this payload leaves the machine,
+        // and a receiver that wants them can ask for the call by id.
+        if let Some(queue) = &self.webhook_queue {
+            let payload = serde_json::json!({
+                "event": "call.completed",
+                "call_id": call_id.to_string(),
+                "organization_id": call.organization_id.to_string(),
+                "title": analysis.title,
+                "summary": analysis.summary,
+                "resolved": analysis.resolved,
+                "sentiment_score": analysis.sentiment_score,
+                "action_items": analysis.action_items,
+                "key_facts": analysis.key_facts,
+                "topics": topic_names,
+                "language": transcript.languages.first().map(|l| l.language.clone()),
+                "duration_ms": call.duration_ms,
+                "completed_at": analysis.created_at,
+            });
+
+            let request =
+                callmind_core::EnqueueJob::new(callmind_core::JobKind::DeliverWebhook, payload)
+                    .with_call_id(call_id);
+
+            // Retryable rather than swallowed: a delivery dropped on the floor is
+            // invisible to both ends. The retry reuses the stored transcript.
+            queue.enqueue(&request).await.map_err(|e| {
+                JobExecutionError::Retryable(format!("Failed to queue webhook delivery: {e}"))
+            })?;
+        }
 
         info!(
             "Successfully finished intelligence pipeline for Call {}",

@@ -9,10 +9,12 @@ pub mod errors;
 pub mod handler;
 pub mod pipeline;
 pub mod plugin;
+pub mod webhook;
 pub mod worker;
 
 pub use errors::*;
 pub use handler::*;
 pub use pipeline::*;
 pub use plugin::{CallAnalysisContext, Plugin, run_transcript_plugins};
+pub use webhook::{SECRET_HEADER, WebhookDeliveryHandler};
 pub use worker::*;

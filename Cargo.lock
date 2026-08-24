@@ -811,6 +811,7 @@ name = "callmind-jobs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "callmind-analysis",
  "callmind-audio",
  "callmind-config",
@@ -826,6 +827,7 @@ dependencies = [
  "callmind-ui",
  "callmind-vad",
  "chrono",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

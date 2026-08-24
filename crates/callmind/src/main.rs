@@ -299,9 +299,17 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     // many there are.
     let plugins: Vec<Arc<dyn callmind_plugin_api::Plugin>> = Vec::new();
 
+    // Nothing leaves the machine unless a receiver is configured, so the pipeline
+    // is handed a queue only in that case.
+    let webhook_receiver = config.outbound_webhook.url.clone();
+    let webhook_queue: Option<Arc<dyn callmind_db::JobRepository>> = webhook_receiver
+        .as_ref()
+        .map(|_| job_repo.clone() as Arc<dyn callmind_db::JobRepository>);
+
     let pipeline_handler = CallPipelineHandler {
         call_repo: call_repo.clone(),
         speaker_repo: call_repo.clone(),
+        webhook_queue,
         plugins: plugins.clone(),
         storage: storage.clone(),
         transcriber,
@@ -313,6 +321,25 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     let cancellation_token = CancellationToken::new();
     let mut registry_builder =
         JobRegistry::builder().register(JobKind::IngestRecording, pipeline_handler);
+
+    if let Some(url) = webhook_receiver {
+        info!(
+            "Outbound webhook enabled; finished calls will be delivered (secret {})",
+            if config.outbound_webhook.secret.is_some() {
+                "set"
+            } else {
+                "not set"
+            }
+        );
+        registry_builder = registry_builder.register(
+            JobKind::DeliverWebhook,
+            callmind_jobs::WebhookDeliveryHandler::new(
+                url,
+                config.outbound_webhook.secret.clone(),
+                Duration::from_secs(config.outbound_webhook.timeout_seconds),
+            ),
+        );
+    }
     for plugin in &plugins {
         info!(
             "Loading plugin '{}' (job kind {})",

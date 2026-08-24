@@ -60,6 +60,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub workers: WorkersConfig,
+
+    #[serde(default)]
+    pub outbound_webhook: OutboundWebhookConfig,
 }
 
 impl AppConfig {
@@ -131,6 +134,16 @@ impl AppConfig {
             if !val.trim().is_empty() {
                 self.auth.api_key = Some(val);
                 self.auth.enabled = true;
+            }
+        }
+        if let Some(val) = lookup("CALLMIND_OUTBOUND_WEBHOOK_URL") {
+            if !val.trim().is_empty() {
+                self.outbound_webhook.url = Some(val);
+            }
+        }
+        if let Some(val) = lookup("CALLMIND_OUTBOUND_WEBHOOK_SECRET") {
+            if !val.trim().is_empty() {
+                self.outbound_webhook.secret = Some(val);
             }
         }
         if let Some(val) = lookup("CALLMIND_TELEGRAM_BOT_TOKEN") {
@@ -593,6 +606,49 @@ pub struct WebhookBotConfig {
     pub secret_token: Option<String>,
 }
 
+/// Where to POST a call once it finishes, making CallMind a producer rather than
+/// only a consumer of audio.
+///
+/// Off unless a URL is set: this is the one setting that sends call content off
+/// the machine.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutboundWebhookConfig {
+    /// Receiver URL. Absent or empty disables delivery.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub url: Option<String>,
+
+    /// Sent as `X-CallMind-Secret` so the receiver can tell the request is ours.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub secret: Option<String>,
+
+    #[serde(default = "default_webhook_timeout_seconds")]
+    pub timeout_seconds: u64,
+}
+
+impl Default for OutboundWebhookConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            secret: None,
+            timeout_seconds: default_webhook_timeout_seconds(),
+        }
+    }
+}
+
+fn default_webhook_timeout_seconds() -> u64 {
+    30
+}
+
+/// An unset environment variable expands to an empty string in a compose file or
+/// a shell, and reading that as a value enables things nobody asked for.
+fn empty_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.filter(|value| !value.trim().is_empty()))
+}
+
 fn default_true() -> bool {
     true
 }
@@ -610,12 +666,16 @@ pub struct ModelsConfig {
     /// model meant rebuilding.
     ///
     /// The default is `whisper-large-v3-turbo` rather than the full
-    /// `whisper-large-v3`, measured on two real Russian calls: turbo transcribed
-    /// 2.24x and 1.94x faster, and was never the worse transcript. On the shorter
-    /// call the two agreed word for word (similarity 1.000). On the longer one
-    /// full-v3 emitted 161 more words, but they were a repetition loop -- "there
-    /// with chicken" three times over -- which turbo did not produce; that loop is
-    /// also what made it slower, since every repeat is decoded.
+    /// `whisper-large-v3`, measured on two real Russian calls of about 14
+    /// minutes each: turbo transcribed 2.24x and 2.93x faster, and was the
+    /// better transcript on both -- which was not the expected direction.
+    /// Full-v3 emitted more words, but they were repetition loops (words inside
+    /// an immediately repeated 5-gram: 11 versus 0, and 14 versus 1). Where it
+    /// looped, turbo had real speech: one 10-word loop stands where turbo
+    /// transcribed 40 words of conversation. The loops are also why it was
+    /// slower, since every repeat is decoded. Turbo is not strictly better --
+    /// it dropped one 31-word run the full model kept -- but its failures are
+    /// smaller and rarer.
     ///
     /// Point this at `stt/whisper-large-v3.bin` for a language where the full
     /// model earns its time. Both calls measured here were Russian; English,
@@ -823,8 +883,8 @@ mod logging_config_tests {
 mod stt_model_config_tests {
     use super::*;
 
-    /// Turbo is the default because it was measured 2x faster with no loss on
-    /// real recordings -- see the note on [`ModelsConfig::stt_multilingual`].
+    /// Turbo is the default because it was measured 2-3x faster and the better
+    /// transcript on real recordings -- see [`ModelsConfig::stt_multilingual`].
     #[test]
     fn the_default_multilingual_model_is_the_turbo_one() {
         let config = ModelsConfig::default();
@@ -844,5 +904,75 @@ mod stt_model_config_tests {
             "an unset field keeps its default"
         );
         assert_eq!(config.models_dir, default_models_dir());
+    }
+}
+
+#[cfg(test)]
+mod outbound_webhook_config_tests {
+    use super::*;
+
+    /// Off unless asked for: this is the one setting that sends call content off
+    /// the machine, so an absent section must not enable it.
+    #[test]
+    fn it_is_disabled_by_default() {
+        let config: AppConfig = serde_yaml::from_str("server: {}").expect("parses");
+        assert_eq!(config.outbound_webhook.url, None);
+        assert_eq!(config.outbound_webhook.secret, None);
+        assert_eq!(config.outbound_webhook.timeout_seconds, 30);
+    }
+
+    #[test]
+    fn a_configured_receiver_is_read_with_its_secret() {
+        let config: AppConfig = serde_yaml::from_str(
+            "outbound_webhook:\n  url: https://example.test/hook\n  secret: shh\n  timeout_seconds: 5\n",
+        )
+        .expect("parses");
+        assert_eq!(
+            config.outbound_webhook.url.as_deref(),
+            Some("https://example.test/hook")
+        );
+        assert_eq!(config.outbound_webhook.secret.as_deref(), Some("shh"));
+        assert_eq!(config.outbound_webhook.timeout_seconds, 5);
+    }
+
+    /// An empty string is what a shell writes for an unset variable, and reading
+    /// it as a receiver URL would post every call to nowhere on every call.
+    #[test]
+    fn an_empty_url_counts_as_no_receiver() {
+        let config: AppConfig =
+            serde_yaml::from_str("outbound_webhook:\n  url: \"\"\n").expect("parses");
+        assert_eq!(config.outbound_webhook.url, None);
+    }
+}
+
+#[cfg(test)]
+mod outbound_webhook_env_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// The secret would otherwise only be settable by writing it into a YAML file
+    /// on disk, which is the wrong place for it in a container.
+    #[test]
+    fn the_receiver_and_its_secret_come_from_the_environment() {
+        let env: HashMap<&str, &str> = HashMap::from([
+            ("CALLMIND_OUTBOUND_WEBHOOK_URL", "https://n8n.test/hook"),
+            ("CALLMIND_OUTBOUND_WEBHOOK_SECRET", "shh"),
+        ]);
+        let mut config = AppConfig::default();
+        config.apply_overrides_from(|key| env.get(key).map(|v| (*v).to_string()));
+
+        assert_eq!(
+            config.outbound_webhook.url.as_deref(),
+            Some("https://n8n.test/hook")
+        );
+        assert_eq!(config.outbound_webhook.secret.as_deref(), Some("shh"));
+    }
+
+    #[test]
+    fn an_empty_variable_does_not_enable_delivery() {
+        let env: HashMap<&str, &str> = HashMap::from([("CALLMIND_OUTBOUND_WEBHOOK_URL", "")]);
+        let mut config = AppConfig::default();
+        config.apply_overrides_from(|key| env.get(key).map(|v| (*v).to_string()));
+        assert_eq!(config.outbound_webhook.url, None);
     }
 }
