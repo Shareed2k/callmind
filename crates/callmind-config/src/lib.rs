@@ -601,6 +601,40 @@ fn default_true() -> bool {
 pub struct ModelsConfig {
     #[serde(default = "default_models_dir")]
     pub models_dir: PathBuf,
+
+    /// Speech-to-text weights, relative to `models_dir`.
+    ///
+    /// Configurable because transcription is 88.8% of processing time -- 74.8 s of
+    /// an 84.2 s total on a 13.8-minute call -- and the model is the only real
+    /// lever on it. These filenames used to be compiled in, so trying a faster
+    /// model meant rebuilding.
+    ///
+    /// The default is `whisper-large-v3-turbo` rather than the full
+    /// `whisper-large-v3`, measured on two real Russian calls: turbo transcribed
+    /// 2.24x and 1.94x faster, and was never the worse transcript. On the shorter
+    /// call the two agreed word for word (similarity 1.000). On the longer one
+    /// full-v3 emitted 161 more words, but they were a repetition loop -- "there
+    /// with chicken" three times over -- which turbo did not produce; that loop is
+    /// also what made it slower, since every repeat is decoded.
+    ///
+    /// Point this at `stt/whisper-large-v3.bin` for a language where the full
+    /// model earns its time. Both calls measured here were Russian; English,
+    /// Arabic and the rest are untested, and Hebrew never reaches this model
+    /// because language identification routes it to `stt_hebrew`.
+    #[serde(default = "default_stt_multilingual")]
+    pub stt_multilingual: String,
+
+    /// Used when language identification is confident the call is Hebrew.
+    #[serde(default = "default_stt_hebrew")]
+    pub stt_hebrew: String,
+}
+
+fn default_stt_multilingual() -> String {
+    "stt/whisper-large-v3-turbo.bin".to_string()
+}
+
+fn default_stt_hebrew() -> String {
+    "stt/ivrit-ai-large-v3-turbo.bin".to_string()
 }
 
 fn default_models_dir() -> PathBuf {
@@ -611,6 +645,8 @@ impl Default for ModelsConfig {
     fn default() -> Self {
         Self {
             models_dir: default_models_dir(),
+            stt_multilingual: default_stt_multilingual(),
+            stt_hebrew: default_stt_hebrew(),
         }
     }
 }
@@ -780,5 +816,33 @@ mod logging_config_tests {
     #[test]
     fn an_unknown_format_is_rejected_rather_than_ignored() {
         assert!(serde_yaml::from_str::<LoggingConfig>("format: jsonl").is_err());
+    }
+}
+
+#[cfg(test)]
+mod stt_model_config_tests {
+    use super::*;
+
+    /// Turbo is the default because it was measured 2x faster with no loss on
+    /// real recordings -- see the note on [`ModelsConfig::stt_multilingual`].
+    #[test]
+    fn the_default_multilingual_model_is_the_turbo_one() {
+        let config = ModelsConfig::default();
+        assert_eq!(config.stt_multilingual, "stt/whisper-large-v3-turbo.bin");
+        assert_eq!(config.stt_hebrew, "stt/ivrit-ai-large-v3-turbo.bin");
+    }
+
+    /// The knob has to work in both directions: a language where the full model
+    /// is worth its time must be selectable without a recompile.
+    #[test]
+    fn the_slower_accurate_model_can_be_selected_without_rebuilding() {
+        let config: ModelsConfig =
+            serde_yaml::from_str("stt_multilingual: stt/whisper-large-v3.bin").expect("parses");
+        assert_eq!(config.stt_multilingual, "stt/whisper-large-v3.bin");
+        assert_eq!(
+            config.stt_hebrew, "stt/ivrit-ai-large-v3-turbo.bin",
+            "an unset field keeps its default"
+        );
+        assert_eq!(config.models_dir, default_models_dir());
     }
 }

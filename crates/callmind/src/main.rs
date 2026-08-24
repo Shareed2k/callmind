@@ -194,20 +194,27 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         None => Arc::new(callmind_vad::EnergyVadEngine::default()),
     };
 
-    let hebrew_model_path = config
+    // From config, not compiled in: speech-to-text dominates processing time and
+    // the model is the lever on it.
+    let hebrew_model_path = config.models.models_dir.join(&config.models.stt_hebrew);
+    let multi_model_path = config
         .models
         .models_dir
-        .join("stt/ivrit-ai-large-v3-turbo.bin");
-    let multi_model_path = config.models.models_dir.join("stt/whisper-large-v3.bin");
+        .join(&config.models.stt_multilingual);
 
+    ensure_model_present("hebrew speech-to-text", &hebrew_model_path)?;
+    ensure_model_present("multilingual speech-to-text", &multi_model_path)?;
+
+    let hebrew_label = model_label(&hebrew_model_path);
+    let multi_label = model_label(&multi_model_path);
     let hebrew_stt = Arc::new(callmind_stt::WhisperCppEngine::new(
         hebrew_model_path,
-        "ivrit-ai-turbo",
+        &hebrew_label,
         "1.0",
     ));
     let multi_stt = Arc::new(callmind_stt::WhisperCppEngine::new(
         multi_model_path,
-        "whisper-large-v3",
+        &multi_label,
         "1.0",
     ));
     let stt_router = Arc::new(callmind_stt::SttRouter::new(
@@ -1023,4 +1030,65 @@ fn init_tracing_with(format: callmind_config::LogFormat) {
             )
             .try_init(),
     };
+}
+
+/// A missing weights file otherwise surfaces as a failed job on the first call,
+/// long after startup, so refuse to start and name the command that fixes it.
+fn ensure_model_present(kind: &str, path: &std::path::Path) -> Result<()> {
+    anyhow::ensure!(
+        path.exists(),
+        "{kind} model not found at {}. Fetch it with `callmind models download <id>` \
+         (`callmind models list` shows the ids), or point `models.stt_*` in the config \
+         at a file you already have.",
+        path.display()
+    );
+    Ok(())
+}
+
+/// The label is stored with every transcript, so it follows the configured file
+/// instead of guessing which model is loaded.
+fn model_label(path: &std::path::Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+#[cfg(test)]
+mod stt_model_startup_tests {
+    use super::*;
+
+    /// A missing weights file otherwise surfaces as a failed job on the first
+    /// call, long after startup -- and switching the default multilingual model
+    /// to turbo makes that likely for anyone who downloaded the old default.
+    #[test]
+    fn a_missing_model_is_refused_at_startup_with_the_command_that_fixes_it() {
+        let err = ensure_model_present("multilingual", &PathBuf::from("/nope/turbo.bin"))
+            .expect_err("a missing model must not be accepted");
+        let msg = err.to_string();
+        assert!(msg.contains("/nope/turbo.bin"), "names the file: {msg}");
+        assert!(msg.contains("models download"), "names the fix: {msg}");
+    }
+
+    #[test]
+    fn a_present_model_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("turbo.bin");
+        std::fs::write(&path, b"weights").expect("write");
+        ensure_model_present("multilingual", &path).expect("a present model is fine");
+    }
+
+    /// The label is stored with every transcript, so it has to follow the
+    /// configured file rather than a compiled-in guess at which model is loaded.
+    #[test]
+    fn the_engine_label_follows_the_configured_filename() {
+        assert_eq!(
+            model_label(&PathBuf::from("models/stt/whisper-large-v3-turbo.bin")),
+            "whisper-large-v3-turbo"
+        );
+        assert_eq!(
+            model_label(&PathBuf::from("models/stt/whisper-large-v3.bin")),
+            "whisper-large-v3"
+        );
+    }
 }

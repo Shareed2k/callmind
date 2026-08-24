@@ -42,6 +42,15 @@ models:
   #   `python3 scripts/export_pyannote_segmentation.py --out models/diarization/segmentation.onnx`
   #   -- the published export cannot be loaded by a pure-Rust runtime as-is.
   models_dir: "./models"
+  # Speech-to-text weights, relative to models_dir. This is the stage that costs
+  # 88.8% of processing time, so it is the one worth experimenting with:
+  #   stt/whisper-large-v3-turbo.bin  ~1.5 GB  (default) -- measured 2x faster
+  #     than the full model on two real Russian calls, with an identical
+  #     transcript on one and no repetition loop on the other.
+  #   stt/whisper-large-v3.bin        ~2.9 GB  (`models download whisper-large-v3`)
+  #     the full model; try it if your language transcribes worse on turbo.
+  stt_multilingual: "stt/whisper-large-v3-turbo.bin"
+  stt_hebrew: "stt/ivrit-ai-large-v3-turbo.bin"
 
 llm:
   provider: "ollama" # "ollama", "openai", "anthropic", "heuristic"

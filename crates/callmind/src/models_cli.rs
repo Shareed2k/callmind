@@ -44,6 +44,18 @@ pub const REGISTERED_MODELS: &[ModelSpec] = &[
         sha256: "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
     },
     ModelSpec {
+        id: "whisper-turbo",
+        kind: "STT Multilingual Fast",
+        filename: "stt/whisper-large-v3-turbo.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+        // Roughly half the weights of large-v3. Point `models.stt_multilingual`
+        // at it to trade some accuracy for speed on the stage that costs 87% of
+        // processing time -- and measure on your own recordings, because which
+        // way that trade falls depends on the language and the audio.
+        size_mb: 1564,
+        sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+    },
+    ModelSpec {
         id: "ivrit-ai-v3",
         kind: "STT Hebrew Fine-Tuned",
         filename: "stt/ivrit-ai-large-v3.bin",
