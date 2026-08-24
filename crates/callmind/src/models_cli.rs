@@ -193,10 +193,7 @@ pub async fn run_models_command(models_dir: &Path, cmd: ModelCommands) -> Result
                     continue;
                 }
 
-                let mut file = File::open(&target_path)?;
-                let mut hasher = Sha256::new();
-                std::io::copy(&mut file, &mut hasher)?;
-                let hash = hex::encode(hasher.finalize());
+                let hash = sha256_file(&target_path)?;
 
                 if spec.sha256.is_empty() {
                     println!(
@@ -334,4 +331,62 @@ async fn download_file_resumable(url: &str, dest_path: &Path) -> Result<()> {
         downloaded / (1024 * 1024)
     );
     Ok(())
+}
+
+/// SHA-256 of a file, read in blocks.
+///
+/// sha2 0.11 dropped the `io::Write` implementation its hashers used to carry,
+/// so `io::copy` no longer feeds one. Reading in blocks is what the file needs
+/// anyway: model weights run to several gigabytes and must not be loaded whole.
+fn sha256_file(path: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read;
+
+    const BLOCK: usize = 1 << 20;
+
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; BLOCK];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(test)]
+mod checksum_tests {
+    use super::*;
+
+    /// sha2 0.11 dropped the `io::Write` implementation its hashers used to
+    /// carry, so `io::copy` no longer feeds one. Model files run to gigabytes,
+    /// so they are read in fixed-size blocks rather than loaded whole.
+    #[test]
+    fn it_hashes_a_file_in_blocks_like_sha256sum_does() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("payload.bin");
+        std::fs::write(&path, b"abc").expect("write");
+
+        assert_eq!(
+            sha256_file(&path).expect("hash"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "the published vector for \"abc\""
+        );
+    }
+
+    /// A model that downloaded as an empty file must not look like a match for
+    /// something; the empty digest is a real, recognisable value.
+    #[test]
+    fn an_empty_file_hashes_to_the_empty_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("empty.bin");
+        std::fs::write(&path, b"").expect("write");
+
+        assert_eq!(
+            sha256_file(&path).expect("hash"),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
 }

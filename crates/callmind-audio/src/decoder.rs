@@ -5,13 +5,13 @@ use std::fs::File;
 use std::io::Cursor;
 use std::io::Read;
 use std::path::Path;
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::codecs::CodecParameters;
+use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 use tracing::debug;
 
 /// Pure-Rust audio decoder powered by Symphonia.
@@ -77,74 +77,86 @@ impl AudioDecoder {
     }
 
     /// Decode an audio media source stream into an `AudioBuffer`.
-    fn decode_source(source: Box<dyn MediaSource>, hint: Hint) -> Result<AudioBuffer, AudioError> {
-        let mss = MediaSourceStream::new(source, Default::default());
-
-        let fmt_opts = FormatOptions {
-            enable_gapless: true,
-            ..Default::default()
-        };
-        let meta_opts = MetadataOptions::default();
-
-        let mut probed = symphonia::default::get_probe()
-            .format(&hint, mss, &fmt_opts, &meta_opts)
-            .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
-
-        let track = probed
-            .format
-            .default_track()
-            .or_else(|| probed.format.tracks().first())
+    /// The audio track's id and codec parameters.
+    ///
+    /// Both are copied out of the reader's borrow so it can be advanced
+    /// afterwards, and `codec_params` is an `Option<CodecParameters>` enum in
+    /// symphonia 0.6: a track whose codec could not be determined is unplayable
+    /// rather than silently empty.
+    fn audio_track(
+        reader: &dyn symphonia::core::formats::FormatReader,
+    ) -> Result<(u32, AudioCodecParameters), AudioError> {
+        let track = reader
+            .default_track(TrackType::Audio)
+            .or_else(|| {
+                reader
+                    .tracks()
+                    .iter()
+                    .find(|t| matches!(t.codec_params, Some(CodecParameters::Audio(_))))
+            })
             .ok_or_else(|| {
                 AudioError::UnsupportedFormat("No audio track found in media stream".into())
             })?;
 
-        let dec_opts = DecoderOptions::default();
+        let Some(CodecParameters::Audio(params)) = track.codec_params.as_ref() else {
+            return Err(AudioError::UnsupportedFormat(
+                "Audio track carries no codec parameters".into(),
+            ));
+        };
+
+        Ok((track.id, params.clone()))
+    }
+
+    fn decode_source(source: Box<dyn MediaSource>, hint: Hint) -> Result<AudioBuffer, AudioError> {
+        let mss = MediaSourceStream::new(source, Default::default());
+
+        // Gapless playback is a decoder option in symphonia 0.6 rather than a
+        // format one, and it defaults to on. It is what drops an Opus encoder's
+        // pre-skip, which keeps word timestamps aligned with the audio.
+        let mut reader = symphonia::default::get_probe()
+            .probe(
+                &hint,
+                mss,
+                FormatOptions::default(),
+                MetadataOptions::default(),
+            )
+            .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+
+        // Copied out of the borrow so the reader can be advanced below.
+        let (track_id, params) = Self::audio_track(reader.as_ref())?;
+
         let mut decoder = symphonia::default::get_codecs()
-            .make(&track.codec_params, &dec_opts)
+            .make_audio_decoder(&params, &AudioDecoderOptions::default())
             .map_err(|e| AudioError::Decode(e.to_string()))?;
 
-        let track_id = track.id;
-        let mut sample_rate = track.codec_params.sample_rate.unwrap_or(16000);
-        let mut channels = track.codec_params.channels.map_or(1, |c| c.count() as u16);
+        let mut sample_rate = params.sample_rate.unwrap_or(16000);
+        let mut channels = params.channels.as_ref().map_or(1, |c| c.count() as u16);
 
         let mut samples_out: Vec<f32> = Vec::new();
-        let mut sample_buf: Option<SampleBuffer<f32>> = None;
+        let mut interleaved: Vec<f32> = Vec::new();
 
         loop {
-            let packet = match probed.format.next_packet() {
-                Ok(packet) => packet,
-                Err(SymphoniaError::IoError(e))
-                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
-                    break;
-                }
-                Err(SymphoniaError::ResetRequired) => {
-                    continue;
-                }
+            let packet = match reader.next_packet() {
+                // End of stream is `Ok(None)` now, not an unexpected-EOF error.
+                Ok(Some(packet)) => packet,
+                Ok(None) => break,
+                Err(SymphoniaError::ResetRequired) => continue,
                 Err(e) => {
                     debug!("End of audio stream or decode termination: {e}");
                     break;
                 }
             };
 
-            if packet.track_id() != track_id {
+            if packet.track_id != track_id {
                 continue;
             }
 
             match decoder.decode(&packet) {
                 Ok(audio_buf) => {
-                    let spec = *audio_buf.spec();
-                    sample_rate = spec.rate;
-                    channels = spec.channels.count() as u16;
-
-                    if sample_buf.is_none() {
-                        sample_buf = Some(SampleBuffer::new(audio_buf.capacity() as u64, spec));
-                    }
-
-                    if let Some(buf) = sample_buf.as_mut() {
-                        buf.copy_interleaved_ref(audio_buf);
-                        samples_out.extend_from_slice(buf.samples());
-                    }
+                    sample_rate = audio_buf.spec().rate();
+                    channels = audio_buf.spec().channels().count() as u16;
+                    audio_buf.copy_to_vec_interleaved(&mut interleaved);
+                    samples_out.extend_from_slice(&interleaved);
                 }
                 Err(SymphoniaError::DecodeError(e)) => {
                     debug!("Skipping corrupt audio frame: {e}");
@@ -200,31 +212,37 @@ impl AudioDecoder {
         }
 
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
-        let probed = symphonia::default::get_probe()
-            .format(
+        let reader = symphonia::default::get_probe()
+            .probe(
                 &hint,
                 mss,
-                &FormatOptions::default(),
-                &MetadataOptions::default(),
+                FormatOptions::default(),
+                MetadataOptions::default(),
             )
             .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
 
-        let Some(track) = probed
-            .format
-            .default_track()
-            .or_else(|| probed.format.tracks().first())
-        else {
+        let Some(track) = reader.default_track(TrackType::Audio).or_else(|| {
+            reader
+                .tracks()
+                .iter()
+                .find(|t| matches!(t.codec_params, Some(CodecParameters::Audio(_))))
+        }) else {
             return Ok(None);
         };
 
-        let params = &track.codec_params;
+        let Some(CodecParameters::Audio(params)) = track.codec_params.as_ref() else {
+            return Ok(None);
+        };
         let Some(sample_rate) = params.sample_rate else {
             return Ok(None);
         };
-        let channels = params.channels.map_or(1, |c| c.count() as u16);
+        let channels = params.channels.as_ref().map_or(1, |c| c.count() as u16);
 
-        // `n_frames` is per channel, so duration does not depend on channel count.
-        let Some(frames) = params.n_frames else {
+        // The frame count moved from the codec parameters onto the track in
+        // symphonia 0.6, and it now excludes delay and padding -- which is what
+        // a duration should count. It is per channel, so duration does not
+        // depend on the channel count.
+        let Some(frames) = track.num_frames else {
             return Ok(None);
         };
         let duration_ms = (frames.saturating_mul(1000)) / u64::from(sample_rate.max(1));
