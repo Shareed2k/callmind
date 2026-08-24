@@ -129,6 +129,7 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         &config.database.driver,
         &config.database.url,
         config.database.max_connections,
+        Duration::from_millis(config.database.busy_timeout_ms),
     )
     .await
     .context("Failed to connect to the database")?;
@@ -541,7 +542,13 @@ async fn run_migrate(config_path: Option<PathBuf>) -> Result<()> {
     info!("Running CallMind database migrations...");
 
     let config = AppConfig::load_from_file_or_default(config_path)?;
-    let db = connect(&config.database.driver, &config.database.url, 2).await?;
+    let db = connect(
+        &config.database.driver,
+        &config.database.url,
+        2,
+        Duration::from_millis(config.database.busy_timeout_ms),
+    )
+    .await?;
     run_migrations_on(&db).await?;
 
     println!("All database migrations applied successfully.");
@@ -563,7 +570,14 @@ async fn run_doctor(config_path: Option<PathBuf>) -> Result<()> {
     };
 
     // Check Database
-    match connect(&config.database.driver, &config.database.url, 2).await {
+    match connect(
+        &config.database.driver,
+        &config.database.url,
+        2,
+        Duration::from_millis(config.database.busy_timeout_ms),
+    )
+    .await
+    {
         Ok(db) => {
             println!(
                 "[✓] {} database connected ({})",
@@ -619,7 +633,13 @@ async fn run_import(
     println!("Scanning directory: {:?}", import_path);
 
     let config = AppConfig::load_from_file_or_default(config_path)?;
-    let db = connect(&config.database.driver, &config.database.url, 4).await?;
+    let db = connect(
+        &config.database.driver,
+        &config.database.url,
+        4,
+        Duration::from_millis(config.database.busy_timeout_ms),
+    )
+    .await?;
     run_migrations_on(&db).await?;
 
     let call_repo = Arc::new(SqlCallRepository::new(db.clone()));
@@ -938,7 +958,13 @@ async fn run_backfill(config_path: Option<PathBuf>) -> Result<()> {
     println!("=== CallMind Metadata Backfill ===");
 
     let config = AppConfig::load_from_file_or_default(config_path)?;
-    let db = connect(&config.database.driver, &config.database.url, 4).await?;
+    let db = connect(
+        &config.database.driver,
+        &config.database.url,
+        4,
+        Duration::from_millis(config.database.busy_timeout_ms),
+    )
+    .await?;
     run_migrations_on(&db).await?;
     let call_repo = SqlCallRepository::new(db);
     let storage: Arc<dyn callmind_storage::RecordingStorage> =
@@ -1008,7 +1034,13 @@ async fn run_reprocess(config_path: Option<PathBuf>, call_id_str: String) -> Res
     println!("Target Call ID: {}", call_id);
 
     let config = AppConfig::load_from_file_or_default(config_path)?;
-    let db = connect(&config.database.driver, &config.database.url, 4).await?;
+    let db = connect(
+        &config.database.driver,
+        &config.database.url,
+        4,
+        Duration::from_millis(config.database.busy_timeout_ms),
+    )
+    .await?;
     run_migrations_on(&db).await?;
 
     let call_repo = Arc::new(SqlCallRepository::new(db.clone()));

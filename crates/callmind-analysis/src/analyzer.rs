@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use std::sync::Arc;
 use thiserror::Error;
+use tracing::warn;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -70,6 +71,30 @@ struct LlmRawAnalysis {
 pub struct AnalysisEngine {
     llm: Arc<dyn LlmEngine>,
     context_tokens: usize,
+}
+
+/// Whether generated prose is one phrase repeated rather than a summary.
+///
+/// A model can return valid JSON whose contents are degenerate -- the retry in
+/// the LLM engine only catches answers that fail to parse. Measured on a real
+/// call whose hold announcement repeats a company name, the stored summary read
+/// `OPC, OPC, OPC, OPC, OPC`.
+///
+/// Rejects only text where words repeat about three times over on average, so
+/// ordinary prose, which repeats function words, is left alone.
+fn is_degenerate(text: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < 4 {
+        return false;
+    }
+    let distinct: std::collections::HashSet<String> = words
+        .iter()
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .collect();
+    distinct.len() * 3 <= words.len()
 }
 
 impl AnalysisEngine {
@@ -275,7 +300,9 @@ impl AnalysisEngine {
                 let parsed_summary = raw.summary.unwrap_or_else(|| heuristic.summary.clone());
                 let final_summary = if parsed_summary.contains("misunderstandings,")
                     || parsed_summary.contains("neither nor")
+                    || is_degenerate(&parsed_summary)
                 {
+                    warn!("Model returned a degenerate summary; using the transcript instead");
                     heuristic.summary.clone()
                 } else {
                     parsed_summary
@@ -283,6 +310,7 @@ impl AnalysisEngine {
 
                 let final_title = raw
                     .title
+                    .filter(|t| !is_degenerate(t))
                     .filter(|t| {
                         !t.eq_ignore_ascii_case("Conversation")
                             && !t.eq_ignore_ascii_case("Customer Service Call")
@@ -751,5 +779,49 @@ mod budget_tests {
         let windows = windows_for_budget(&line, 16);
         assert_eq!(windows.concat(), line);
         assert!(!windows.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod degenerate_output_tests {
+    use super::*;
+
+    /// A model can return perfectly valid JSON whose contents are one phrase
+    /// repeated. The retry in the LLM engine only catches answers that fail to
+    /// parse, so this got through: an archived call's page reads
+    /// `OPC, OPC, OPC, OPC, OPC`, echoed from a hold announcement.
+    #[test]
+    fn one_phrase_repeated_is_not_a_summary() {
+        for repeated in [
+            "OPC, OPC, OPC, OPC, OPC",
+            "OPC OPC OPC OPC",
+            "да да да да да да да да",
+            "כן, כן, כן, כן, כן",
+        ] {
+            assert!(is_degenerate(repeated), "should be rejected: {repeated}");
+        }
+    }
+
+    /// The exact text that reached an archived call's page.
+    #[test]
+    fn the_summary_that_actually_shipped_is_rejected() {
+        let stored = "OPC, OPC, OPC, OPC, OPC, OPC, OPC, OPC, OPC, OPC, OPC, OPC, OPC, OPC, OPC, OPC, OPC, OPC, OPC";
+        assert!(is_degenerate(stored), "stored summary must be rejected");
+    }
+
+    /// Real summaries repeat words too -- rejecting them would replace a good
+    /// analysis with the fallback, which is worse than the problem.
+    #[test]
+    fn ordinary_prose_is_left_alone() {
+        for real in [
+            "הלקוח שאל אם יש במלאי את הדגם Asus New 14 Ultra 7 וביקש הצעת מחיר.",
+            "Разговор о покупке продуктов и поездке в супермаркет.",
+            "Разговор о пианино",
+            "The customer asked about the order and the courier was already there.",
+            "",
+            "OPC",
+        ] {
+            assert!(!is_degenerate(real), "should be kept: {real}");
+        }
     }
 }

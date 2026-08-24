@@ -311,10 +311,6 @@ bots:
     webhook_token: null # shared secret for the inbound webhook
     allowed_numbers: []
     result_timeout_secs: 600
-  slack:
-    enabled: false # config only; no handler implemented yet
-    bot_token: null
-    signing_secret: null
   watcher:
     enabled: false
     watch_dir: "./incoming"

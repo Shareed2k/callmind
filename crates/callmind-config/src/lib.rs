@@ -521,9 +521,6 @@ pub struct BotsConfig {
     pub evolution: EvolutionBotConfig,
 
     #[serde(default)]
-    pub slack: SlackBotConfig,
-
-    #[serde(default)]
     pub webhook: WebhookBotConfig,
 }
 
@@ -583,18 +580,6 @@ pub struct EvolutionBotConfig {
 
 fn default_result_timeout_secs() -> u64 {
     600
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SlackBotConfig {
-    #[serde(default)]
-    pub enabled: bool,
-
-    #[serde(default)]
-    pub bot_token: Option<String>,
-
-    #[serde(default)]
-    pub signing_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -988,5 +973,23 @@ mod llm_model_default_tests {
     #[test]
     fn the_default_model_is_one_that_can_write_hebrew() {
         assert_eq!(LlmConfig::default().model, "qwen2.5:7b");
+    }
+}
+
+#[cfg(test)]
+mod removed_slack_section_tests {
+    use super::*;
+
+    /// The `bots.slack` section had no handler behind it -- it invited putting a
+    /// real `xoxb-` token in a file where nothing would ever read it. Removing a
+    /// key must not break configs that still carry it.
+    #[test]
+    fn a_config_that_still_names_slack_still_loads() {
+        let config: AppConfig = serde_yaml::from_str(
+            "bots:\n  slack:\n    enabled: true\n    bot_token: xoxb-still-here\n  telegram:\n    enabled: true\n",
+        )
+        .expect("an unknown section is ignored, not rejected");
+
+        assert!(config.bots.telegram.enabled, "the rest of the file is read");
     }
 }

@@ -21,7 +21,9 @@ async fn setup_test_app() -> (axum::Router, tempfile::TempDir) {
 }
 
 async fn setup_test_app_with_config(config: AppConfig) -> (axum::Router, tempfile::TempDir) {
-    let pool = create_sqlite_pool(":memory:", 5).await.unwrap();
+    let pool = create_sqlite_pool(":memory:", 5, std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
     run_migrations(&pool).await.unwrap();
 
     let temp_dir = tempdir().unwrap();

@@ -94,11 +94,6 @@ bots:
     allowed_numbers: [] # optional: restrict to specific senders, digits only
     result_timeout_secs: 600
 
-  slack:
-    enabled: false
-    bot_token: null # e.g. "xoxb-your-token"
-    signing_secret: null
-
   webhook:
     enabled: true
     secret_token: null # optional shared secret for incoming audio webhooks (Siri / iOS Shortcuts / n8n)

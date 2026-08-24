@@ -88,9 +88,13 @@ async fn test_full_pipeline_e2e_real_audio() {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("e2e_pipeline.db");
-    let pool = create_sqlite_pool(db_path.to_str().unwrap(), 5)
-        .await
-        .unwrap();
+    let pool = create_sqlite_pool(
+        db_path.to_str().unwrap(),
+        5,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
     run_migrations(&pool).await.unwrap();
 
     let storage_dir = temp_dir.path().join("recordings");
