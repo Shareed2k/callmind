@@ -455,7 +455,7 @@ fn default_llm_endpoint() -> String {
 }
 
 fn default_llm_model() -> String {
-    "llama3.2".to_string()
+    "qwen2.5:7b".to_string()
 }
 
 impl Default for LlmConfig {
@@ -974,5 +974,19 @@ mod outbound_webhook_env_tests {
         let mut config = AppConfig::default();
         config.apply_overrides_from(|key| env.get(key).map(|v| (*v).to_string()));
         assert_eq!(config.outbound_webhook.url, None);
+    }
+}
+
+#[cfg(test)]
+mod llm_model_default_tests {
+    use super::*;
+
+    /// llama3.2:3b degenerated into a repetition loop on a real Hebrew call --
+    /// invalid JSON, generation capped at 4096 tokens, 43 s -- where qwen2.5:7b
+    /// returned a correct Hebrew analysis in 14 s from the same prompt. In a
+    /// Hebrew-first project the smaller model is the wrong default.
+    #[test]
+    fn the_default_model_is_one_that_can_write_hebrew() {
+        assert_eq!(LlmConfig::default().model, "qwen2.5:7b");
     }
 }

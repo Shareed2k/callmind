@@ -859,6 +859,7 @@ name = "callmind-llm"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "callmind-config",
  "callmind-core",
  "reqwest",

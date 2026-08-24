@@ -58,8 +58,13 @@ llm:
   endpoint: "http://localhost:11434"
   # Recommended models:
   # - Hebrew specialized: "dicta-il/DictaLM-3.0-1.7B-Instruct", "yonioz123/Llama-3.2-3B-Hebrew-Master"
-  # - General multilingual: "llama3.2:3b", "qwen2.5:7b", "gpt-4o-mini", "claude-3-5-sonnet-20241022"
-  model: "llama3.2:3b"
+  # - General multilingual: "qwen2.5:7b", "gpt-4o-mini", "claude-3-5-sonnet-20241022"
+  # qwen2.5:7b is the default because llama3.2:3b degenerated into a repetition
+  # loop on a real Hebrew call -- invalid JSON, 43 s, generation stopped only by
+  # the token cap -- where qwen returned a correct Hebrew analysis in 14 s from
+  # the same prompt. Smaller models are fine for English; test yours on a real
+  # call before trusting it.
+  model: "qwen2.5:7b"
   api_key: null
   # Tokens the model is given, sent to Ollama as `num_ctx`. Ollama defaults to a
   # couple of thousand and drops the rest of the prompt without an error -- a

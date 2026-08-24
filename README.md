@@ -144,7 +144,7 @@ CallMind manages AI model weights via a built-in CLI with download resume and SH
 
 1. **Start Ollama** (or configure OpenAI / Anthropic in `callmind.yaml`):
    ```bash
-   ollama run llama3.2:3b
+   ollama run qwen2.5:7b
    ```
 
 2. **Start CallMind**:
@@ -245,7 +245,7 @@ docker compose --profile vulkan up -d
 docker compose --profile cuda up -d
 
 # Pull the default LLM in the Ollama container
-docker compose exec ollama ollama pull llama3.2:3b
+docker compose exec ollama ollama pull qwen2.5:7b
 
 # Download speech & diarization models inside CallMind
 docker compose exec callmind ./callmind models download all
@@ -286,7 +286,7 @@ models:
 llm:
   provider: "ollama" # "ollama", "openai", "anthropic", "heuristic"
   endpoint: "http://localhost:11434"
-  model: "llama3.2:3b"
+  model: "qwen2.5:7b" # smaller models degenerate on Hebrew; see callmind.yaml
 
 auth:
   enabled: false
