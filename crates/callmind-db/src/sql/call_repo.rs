@@ -958,9 +958,14 @@ fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
 }
 
 fn embedding_from_bytes(bytes: &[u8]) -> Vec<f32> {
+    // `as_chunks` rather than `chunks_exact`, because the chunk size is a
+    // constant: it hands back `[u8; 4]` directly instead of a slice that has to
+    // be indexed four times. A trailing partial chunk is dropped either way.
     bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| f32::from_le_bytes(*word))
         .collect()
 }
 
