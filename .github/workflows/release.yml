@@ -57,6 +57,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake pkg-config libasound2-dev libclang-dev libopus-dev ${{ matrix.apt_packages }}
 
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        # Without a system libopus, audiopus_sys falls back to building its
+        # vendored copy, whose CMakeLists declares `cmake_minimum_required`
+        # below 3.5 -- support current CMake has removed. The checks workflow
+        # already installs it; this one did not, so every macOS release build
+        # failed at configure time once the runner image moved to a CMake that
+        # dropped the compatibility.
+        run: brew install opus
+
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
