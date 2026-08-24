@@ -632,6 +632,7 @@ dependencies = [
  "callmind-jobs",
  "callmind-language",
  "callmind-llm",
+ "callmind-plugin-api",
  "callmind-search",
  "callmind-storage",
  "callmind-stt",
@@ -821,6 +822,7 @@ dependencies = [
  "callmind-storage",
  "callmind-stt",
  "callmind-transcript",
+ "callmind-ui",
  "callmind-vad",
  "chrono",
  "serde",
@@ -863,6 +865,29 @@ dependencies = [
  "tokio",
  "tracing",
  "utoipa",
+]
+
+[[package]]
+name = "callmind-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "callmind-analysis",
+ "callmind-audio",
+ "callmind-core",
+ "callmind-db",
+ "callmind-diarization",
+ "callmind-jobs",
+ "callmind-language",
+ "callmind-llm",
+ "callmind-storage",
+ "callmind-stt",
+ "callmind-transcript",
+ "callmind-ui",
+ "callmind-vad",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

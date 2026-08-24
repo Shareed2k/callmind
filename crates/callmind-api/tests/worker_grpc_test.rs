@@ -91,6 +91,7 @@ async fn start() -> Fixture {
     let state = AppState::new(
         Arc::new(AppConfig::default()),
         call_repo.clone(),
+        call_repo.clone(),
         job_repo.clone(),
         stats_repo.clone(),
         storage,

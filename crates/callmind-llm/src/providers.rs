@@ -26,7 +26,11 @@ fn http_client(timeout: Duration) -> reqwest::Client {
 #[must_use]
 pub fn create_llm_engine(config: &LlmConfig) -> Arc<dyn LlmEngine> {
     match config.provider.to_lowercase().as_str() {
-        "ollama" => Arc::new(OllamaEngine::new(&config.endpoint, &config.model)),
+        "ollama" => Arc::new(OllamaEngine::new(
+            &config.endpoint,
+            &config.model,
+            config.context_tokens,
+        )),
         "openai" | "groq" | "vllm" => {
             let api_key = config.api_key.clone().unwrap_or_default();
             Arc::new(OpenAiEngine::new(&config.endpoint, &config.model, api_key))
@@ -53,17 +57,44 @@ pub fn create_llm_engine(config: &LlmConfig) -> Arc<dyn LlmEngine> {
 }
 
 /// Ollama local LLM adapter.
+/// Body of an Ollama `/api/generate` call.
+///
+/// Extracted so the request can be asserted on. `num_ctx` is the field that
+/// matters: Ollama defaults to a couple of thousand tokens and drops whatever
+/// does not fit, without an error, which cut roughly half of a 13-minute call on
+/// this archive.
+fn ollama_generate_body(
+    model: &str,
+    prompt: &str,
+    system: Option<&str>,
+    context_tokens: usize,
+) -> serde_json::Value {
+    json!({
+        "model": model,
+        "prompt": prompt,
+        "system": system.unwrap_or_default(),
+        "stream": false,
+        "format": "json",
+        "options": {
+            "temperature": 0.2,
+            "num_ctx": context_tokens
+        }
+    })
+}
+
 pub struct OllamaEngine {
     client: reqwest::Client,
     endpoint: String,
     model: String,
+    context_tokens: usize,
     semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl OllamaEngine {
-    pub fn new(endpoint: &str, model: &str) -> Self {
+    pub fn new(endpoint: &str, model: &str, context_tokens: usize) -> Self {
         let base = endpoint.trim_end_matches('/');
         Self {
+            context_tokens,
             client: http_client(Duration::from_secs(300)),
             endpoint: format!("{base}/api/generate"),
             model: model.to_string(),
@@ -86,18 +117,7 @@ impl LlmEngine for OllamaEngine {
             .map_err(|e| LlmError::Provider(format!("LLM semaphore acquire error: {e}")))?;
 
         let mut model_name = self.model.clone();
-        let make_body = |m: &str| {
-            json!({
-                "model": m,
-                "prompt": prompt,
-                "system": system.unwrap_or_default(),
-                "stream": false,
-                "format": "json",
-                "options": {
-                    "temperature": 0.2
-                }
-            })
-        };
+        let make_body = |m: &str| ollama_generate_body(m, prompt, system, self.context_tokens);
 
         debug!(
             "Sending Ollama JSON generation request to {}",
@@ -406,5 +426,32 @@ impl LlmEngine for AnthropicEngine {
             .as_str()
             .unwrap_or_default()
             .to_string())
+    }
+}
+
+#[cfg(test)]
+mod ollama_body_tests {
+    use super::*;
+
+    /// Ollama defaults to a small context and silently drops the rest of the
+    /// prompt, with nothing in the logs, so the field has to be on the wire.
+    #[test]
+    fn the_request_carries_the_configured_context_size() {
+        let body = ollama_generate_body("model-x", "prompt text", Some("system text"), 12_345);
+
+        assert_eq!(body["model"], "model-x");
+        assert_eq!(body["prompt"], "prompt text");
+        assert_eq!(body["system"], "system text");
+        assert_eq!(body["format"], "json");
+        assert_eq!(
+            body["options"]["num_ctx"], 12_345,
+            "num_ctx must reach Ollama: {body}"
+        );
+    }
+
+    #[test]
+    fn a_missing_system_prompt_is_an_empty_string_not_null() {
+        let body = ollama_generate_body("m", "p", None, 2048);
+        assert_eq!(body["system"], "");
     }
 }

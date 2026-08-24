@@ -225,6 +225,8 @@ async fn test_full_pipeline_e2e_real_audio() {
                     JobKind::IngestRecording,
                     CallPipelineHandler {
                         call_repo: call_repo.clone(),
+                        speaker_repo: call_repo.clone(),
+                        plugins: Vec::new(),
                         storage: storage.clone(),
                         transcriber: transcriber.clone(),
                         analyzer: analysis_engine.clone(),

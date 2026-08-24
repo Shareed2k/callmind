@@ -23,7 +23,9 @@ pub async fn create_call(
     headers: HeaderMap,
     Json(payload): Json<CreateCallRequest>,
 ) -> Result<Response, ApiError> {
-    let org_id = payload.organization_id.unwrap_or(OrgId::DEFAULT);
+    // The server's own organization, never the caller's choice. See
+    // `CreateCallRequest`.
+    let org_id = OrgId::DEFAULT;
 
     // Check idempotency via external_id or Idempotency-Key header
     let idempotency_key = headers
@@ -175,30 +177,31 @@ pub async fn update_call(
     }
 
     if let Some(ref speaker_map) = payload.speaker_names {
-        // Update speaker labels in transcript_json if it exists
-        let row = state.call_repo.get_transcript_json(id).await?;
-
-        if let Some(raw_json) = row {
+        // Two things happen here, and the second is the point: the name is
+        // written into this call's transcript, and the speaker's voice print is
+        // named so the same person is recognised in later calls without anybody
+        // labelling them again.
+        if let Some(raw_json) = state.call_repo.get_transcript_json(id).await? {
             if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(&raw_json) {
-                if let Some(segments) = json_val
-                    .get_mut("segments")
-                    .and_then(serde_json::Value::as_array_mut)
-                {
-                    for seg in segments {
-                        if let Some(spk_id) =
-                            seg.get("speaker_id").and_then(serde_json::Value::as_u64)
-                        {
-                            if let Some(new_name) = speaker_map.get(&(spk_id as u16)) {
-                                seg["speaker_label"] = serde_json::json!(new_name);
-                            }
-                        }
-                    }
-                    let updated_json = serde_json::to_string(&json_val).unwrap_or(raw_json);
-                    state
-                        .call_repo
-                        .update_transcript_json(id, &updated_json)
-                        .await?;
+                let changed =
+                    callmind_transcript::labels::apply_speaker_labels(&mut json_val, speaker_map);
+                if changed > 0 {
+                    let updated = serde_json::to_string(&json_val).unwrap_or(raw_json);
+                    state.call_repo.update_transcript_json(id, &updated).await?;
                 }
+            }
+        }
+
+        for (speaker, name) in speaker_map {
+            if let Err(e) = state
+                .speaker_repo
+                .name_speaker(id, callmind_core::SpeakerId::new(*speaker), name)
+                .await
+            {
+                // No stored voice print for that speaker -- an older call, or a
+                // run without the embedding model. The transcript is still
+                // renamed; only cross-call recognition is unavailable.
+                tracing::debug!("Speaker {speaker} of call {id} has no voice print: {e}");
             }
         }
     }

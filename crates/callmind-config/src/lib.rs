@@ -44,6 +44,9 @@ pub struct AppConfig {
     pub models: ModelsConfig,
 
     #[serde(default)]
+    pub logging: LoggingConfig,
+
+    #[serde(default)]
     pub llm: LlmConfig,
 
     #[serde(default)]
@@ -412,6 +415,22 @@ pub struct LlmConfig {
 
     #[serde(default)]
     pub api_key: Option<String>,
+
+    /// Tokens the model is given to work with.
+    ///
+    /// Sent to Ollama as `num_ctx`. Ollama defaults to a couple of thousand and
+    /// silently drops the rest of the prompt: measured on a real archive, a
+    /// 13-minute call formats to ~4160 tokens, so roughly half of it never
+    /// reached the model. The analyser compresses whatever still does not fit
+    /// rather than letting it be cut.
+    #[serde(default = "default_llm_context_tokens")]
+    pub context_tokens: usize,
+}
+
+fn default_llm_context_tokens() -> usize {
+    // Comfortable for a few minutes of speech without making the KV cache
+    // expensive on a small local model.
+    8192
 }
 
 fn default_llm_provider() -> String {
@@ -433,6 +452,7 @@ impl Default for LlmConfig {
             endpoint: default_llm_endpoint(),
             model: default_llm_model(),
             api_key: None,
+            context_tokens: default_llm_context_tokens(),
         }
     }
 }
@@ -714,5 +734,51 @@ jobs:
             err.to_string().contains("does not exist"),
             "unexpected error: {err}"
         );
+    }
+}
+
+/// How log lines are written.
+///
+/// The `json` feature of `tracing-subscriber` was already enabled and never
+/// used, so every line went out as prose. Structured output is what makes a log
+/// aggregator able to answer "which stage was slow" instead of a human grepping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    /// Human-readable, for a terminal.
+    #[default]
+    Text,
+    /// One JSON object per line, for shipping somewhere.
+    Json,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    #[serde(default)]
+    pub format: LogFormat,
+}
+
+#[cfg(test)]
+mod logging_config_tests {
+    use super::*;
+
+    #[test]
+    fn the_format_is_text_unless_asked_otherwise() {
+        let config: LoggingConfig = serde_yaml::from_str("{}").expect("empty section");
+        assert_eq!(config.format, LogFormat::Text);
+        assert_eq!(LoggingConfig::default().format, LogFormat::Text);
+    }
+
+    #[test]
+    fn json_can_be_selected_by_name() {
+        let config: LoggingConfig = serde_yaml::from_str("format: json").expect("json");
+        assert_eq!(config.format, LogFormat::Json);
+    }
+
+    /// A typo must be loud. Silently falling back to text is how a deployment
+    /// ends up shipping prose to a log aggregator for a year.
+    #[test]
+    fn an_unknown_format_is_rejected_rather_than_ignored() {
+        assert!(serde_yaml::from_str::<LoggingConfig>("format: jsonl").is_err());
     }
 }

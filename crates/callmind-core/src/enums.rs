@@ -122,8 +122,15 @@ impl FromStr for JobStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
+/// A kind of background job.
+///
+/// `Custom` is the extension point: a closed-source plugin registers a handler
+/// under its own name without this enum being patched. The `plugin:` prefix keeps
+/// the two namespaces apart, so a plugin can never take over a built-in kind.
+///
+/// Not `Copy` any more, because a plugin name is a `String`. There was one call
+/// site relying on that.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum JobKind {
     IngestRecording,
     DecodeAudio,
@@ -135,22 +142,72 @@ pub enum JobKind {
     AnalyzeCall,
     AnalyzeEmotions,
     DeliverWebhook,
+    /// A stage supplied by a plugin, named by the plugin.
+    Custom(String),
+}
+
+/// Prefix that separates plugin kinds from built-in ones.
+const PLUGIN_KIND_PREFIX: &str = "plugin:";
+
+// Serialized as the same string the database stores, rather than serde's default
+// externally-tagged form for a newtype variant. One representation everywhere is
+// worth fifteen lines: two would drift, and the drift would be silent.
+impl Serialize for JobKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.as_str())
+    }
+}
+
+// The schema is written out for the same reason serde is: this is a string on
+// the wire, and a derived enum schema would describe a shape that never travels.
+impl utoipa::PartialSchema for JobKind {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::ObjectBuilder::new()
+            .schema_type(utoipa::openapi::schema::Type::String)
+            .description(Some(
+                "Job kind. A built-in name such as `ingest_recording`, or \
+                 `plugin:<name>` for a stage supplied by a plugin.",
+            ))
+            .into()
+    }
+}
+
+impl utoipa::ToSchema for JobKind {}
+
+impl<'de> Deserialize<'de> for JobKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 impl JobKind {
-    pub fn as_str(&self) -> &'static str {
+    /// The stored form, used both in the database and on the wire.
+    ///
+    /// Borrowed for a built-in kind and owned only for a plugin one, so the
+    /// common path still allocates nothing.
+    #[must_use]
+    pub fn as_str(&self) -> std::borrow::Cow<'static, str> {
+        use std::borrow::Cow;
         match self {
-            Self::IngestRecording => "ingest_recording",
-            Self::DecodeAudio => "decode_audio",
-            Self::DetectLanguage => "detect_language",
-            Self::Transcribe => "transcribe",
-            Self::Diarize => "diarize",
-            Self::BuildTranscript => "build_transcript",
-            Self::NormalizeTranscript => "normalize_transcript",
-            Self::AnalyzeCall => "analyze_call",
-            Self::AnalyzeEmotions => "analyze_emotions",
-            Self::DeliverWebhook => "deliver_webhook",
+            Self::IngestRecording => Cow::Borrowed("ingest_recording"),
+            Self::DecodeAudio => Cow::Borrowed("decode_audio"),
+            Self::DetectLanguage => Cow::Borrowed("detect_language"),
+            Self::Transcribe => Cow::Borrowed("transcribe"),
+            Self::Diarize => Cow::Borrowed("diarize"),
+            Self::BuildTranscript => Cow::Borrowed("build_transcript"),
+            Self::NormalizeTranscript => Cow::Borrowed("normalize_transcript"),
+            Self::AnalyzeCall => Cow::Borrowed("analyze_call"),
+            Self::AnalyzeEmotions => Cow::Borrowed("analyze_emotions"),
+            Self::DeliverWebhook => Cow::Borrowed("deliver_webhook"),
+            Self::Custom(name) => Cow::Owned(format!("{PLUGIN_KIND_PREFIX}{name}")),
         }
+    }
+
+    /// Whether this kind comes from a plugin rather than the core pipeline.
+    #[must_use]
+    pub fn is_plugin(&self) -> bool {
+        matches!(self, Self::Custom(_))
     }
 }
 
@@ -175,7 +232,12 @@ impl FromStr for JobKind {
             "analyze_call" => Ok(Self::AnalyzeCall),
             "analyze_emotions" => Ok(Self::AnalyzeEmotions),
             "deliver_webhook" => Ok(Self::DeliverWebhook),
-            other => Err(format!("Unknown job kind: {other}")),
+            other => match other.strip_prefix(PLUGIN_KIND_PREFIX) {
+                // An empty plugin name is a bug at the registration site, not a
+                // kind: accepting it would create an unaddressable handler.
+                Some("") | None => Err(format!("Unknown job kind: {other}")),
+                Some(name) => Ok(Self::Custom(name.to_string())),
+            },
         }
     }
 }
@@ -285,5 +347,62 @@ impl FromStr for Language {
             "und" | "unknown" => Self::Unknown,
             other => Self::Other(other.to_string()),
         })
+    }
+}
+
+#[cfg(test)]
+mod job_kind_custom_tests {
+    use super::*;
+
+    /// A closed-source plugin must be able to register a job kind without
+    /// patching this enum. The `plugin:` prefix keeps a plugin's name from ever
+    /// colliding with a built-in one.
+    #[test]
+    fn a_plugin_kind_round_trips_through_its_string_form() {
+        let kind = JobKind::Custom("acoustic_emotions".to_string());
+        assert_eq!(kind.as_str(), "plugin:acoustic_emotions");
+        assert_eq!(
+            "plugin:acoustic_emotions".parse::<JobKind>().unwrap(),
+            kind,
+            "the stored string must parse back to the same kind"
+        );
+    }
+
+    #[test]
+    fn built_in_kinds_still_round_trip() {
+        for kind in [
+            JobKind::IngestRecording,
+            JobKind::AnalyzeCall,
+            JobKind::DeliverWebhook,
+        ] {
+            let text = kind.as_str().to_string();
+            assert_eq!(text.parse::<JobKind>().unwrap(), kind, "{text}");
+        }
+    }
+
+    /// A plugin name must not be able to impersonate a built-in kind, and an
+    /// empty one is a bug rather than a kind.
+    #[test]
+    fn a_plugin_kind_cannot_shadow_a_built_in_or_be_empty() {
+        assert_eq!(
+            "plugin:ingest_recording".parse::<JobKind>().unwrap(),
+            JobKind::Custom("ingest_recording".to_string()),
+            "the prefix keeps the namespaces apart"
+        );
+        assert!("plugin:".parse::<JobKind>().is_err());
+        assert!("unknown_thing".parse::<JobKind>().is_err());
+    }
+
+    /// Registry lookup is by value, so two plugin kinds with the same name must
+    /// be the same key and different names must not be.
+    #[test]
+    fn plugin_kinds_compare_and_hash_by_name() {
+        use std::collections::HashMap;
+        let mut map: HashMap<JobKind, u8> = HashMap::new();
+        map.insert(JobKind::Custom("a".into()), 1);
+        map.insert(JobKind::Custom("a".into()), 2);
+        map.insert(JobKind::Custom("b".into()), 3);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[&JobKind::Custom("a".into())], 2);
     }
 }

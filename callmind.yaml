@@ -16,6 +16,12 @@ database:
   # SQLite only. ponytail: not wired -- pool.rs hardcodes 5 s.
   busy_timeout_ms: 5000
 
+logging:
+  # "text" for a terminal, "json" for a log aggregator. Every pipeline stage logs
+  # `stage`, `ms` and `call_id` as fields, so "which stage ate the time" is a
+  # query rather than a grep.
+  format: "text"
+
 storage:
   driver: "filesystem"
   path: "./data/recordings"
@@ -45,6 +51,12 @@ llm:
   # - General multilingual: "llama3.2:3b", "qwen2.5:7b", "gpt-4o-mini", "claude-3-5-sonnet-20241022"
   model: "llama3.2:3b"
   api_key: null
+  # Tokens the model is given, sent to Ollama as `num_ctx`. Ollama defaults to a
+  # couple of thousand and drops the rest of the prompt without an error -- a
+  # 13-minute call formats to roughly 4000 tokens, so half of it was being lost.
+  # Raise it if your model and RAM allow; the analyser compresses whatever still
+  # does not fit rather than letting it be cut.
+  context_tokens: 8192
 
 auth:
   enabled: false

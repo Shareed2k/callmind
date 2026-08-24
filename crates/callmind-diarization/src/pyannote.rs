@@ -274,6 +274,50 @@ fn median(counts: &[usize]) -> usize {
     sorted[sorted.len() / 2].max(1)
 }
 
+/// Adapts the segmenter to the project's [`callmind_vad::VadEngine`] trait.
+///
+/// Speech detection has one other consumer besides diarization: language
+/// identification probes a few windows of speech to decide which Whisper model
+/// to route to. Fed regions from the energy detector those windows can be hold
+/// music or line noise, and the language it infers from them picks the wrong
+/// model for the whole call.
+///
+/// Speech-to-text is deliberately *not* a consumer -- it is given the whole
+/// recording and does its own segmentation.
+pub struct PyannoteVad {
+    segmenter: std::sync::Arc<PyannoteSegmenter>,
+}
+
+impl PyannoteVad {
+    #[must_use]
+    pub fn new(segmenter: std::sync::Arc<PyannoteSegmenter>) -> Self {
+        Self { segmenter }
+    }
+}
+
+impl std::fmt::Debug for PyannoteVad {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PyannoteVad").finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl callmind_vad::VadEngine for PyannoteVad {
+    async fn detect(
+        &self,
+        audio: &AudioBuffer,
+    ) -> Result<Vec<SpeechRegion>, callmind_vad::VadError> {
+        let segmenter = std::sync::Arc::clone(&self.segmenter);
+        let audio = audio.to_mono();
+        // Thousands of frames of neural inference: never on a runtime thread.
+        tokio::task::spawn_blocking(move || segmenter.analyse(&audio))
+            .await
+            .map_err(|e| callmind_vad::VadError::Processing(format!("segmentation task: {e}")))?
+            .map(|seg| seg.speech)
+            .map_err(|e| callmind_vad::VadError::Processing(e.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

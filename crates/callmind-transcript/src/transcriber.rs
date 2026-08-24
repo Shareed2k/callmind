@@ -33,6 +33,15 @@ pub enum TranscriberError {
 /// Deep Conversation Audio Transcription Engine.
 /// Encapsulates resampling, VAD segmentation, language routing, parallel STT + Diarization,
 /// word alignment, role detection, and RTL normalization behind a single call.
+/// What one transcription pass produced.
+///
+/// The voice prints ride alongside the transcript rather than inside it: they are
+/// biometric data with their own table, and the transcript JSON is already large.
+pub struct TranscriptionOutcome {
+    pub transcript: Transcript,
+    pub speaker_embeddings: Vec<(callmind_core::SpeakerId, Vec<f32>)>,
+}
+
 pub struct AudioTranscriber {
     pub vad: Arc<dyn VadEngine>,
     pub language_engine: Arc<dyn LanguageEngine>,
@@ -71,7 +80,7 @@ impl AudioTranscriber {
         channel_mapping: Option<&callmind_core::ChannelMapping>,
         vocabulary: &[crate::vocabulary::VocabularyEntry],
         expected_speakers: Option<usize>,
-    ) -> Result<Transcript, TranscriberError> {
+    ) -> Result<TranscriptionOutcome, TranscriberError> {
         // 1. Channel Analysis & Resampling
         let channel_mode = ChannelAnalyzer::analyze(decoded_audio);
         let resampled_mono = AudioResampler::resample_to_16k_mono(decoded_audio)?;
@@ -187,6 +196,12 @@ impl AudioTranscriber {
             });
         }
 
-        Ok(transcript)
+        Ok(TranscriptionOutcome {
+            transcript,
+            // Carried out separately rather than stored inside the transcript:
+            // the transcript JSON is already hundreds of kilobytes of word
+            // timings, and voice prints belong in their own table anyway.
+            speaker_embeddings: diarization_res.speaker_embeddings,
+        })
     }
 }

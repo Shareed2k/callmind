@@ -7,6 +7,7 @@ use crate::models::{
 use callmind_core::SpeakerRole;
 use callmind_llm::{
     CONVERSATION_ANALYSIS_SYSTEM_PROMPT, LlmEngine, LlmError, build_language_aware_analysis_prompt,
+    build_window_compression_prompt,
 };
 use callmind_transcript::Transcript;
 use chrono::Utc;
@@ -68,11 +69,110 @@ struct LlmRawAnalysis {
 /// Orchestrator for conversation intelligence analysis.
 pub struct AnalysisEngine {
     llm: Arc<dyn LlmEngine>,
+    context_tokens: usize,
 }
 
 impl AnalysisEngine {
     pub fn new(llm: Arc<dyn LlmEngine>) -> Self {
-        Self { llm }
+        Self {
+            llm,
+            context_tokens: 8192,
+        }
+    }
+
+    /// Tokens the model is given.
+    ///
+    /// A transcript that does not fit is summarised window by window rather than
+    /// cut, so the whole call is represented.
+    #[must_use]
+    pub fn with_context_tokens(mut self, tokens: usize) -> Self {
+        self.context_tokens = tokens;
+        self
+    }
+
+    /// Reduce a transcript until the analysis prompt fits the context window.
+    ///
+    /// Each window is summarised on its own and the summaries take the
+    /// transcript's place, so the whole call is represented rather than its
+    /// first few minutes. Repeats if the summaries are themselves too long, and
+    /// gives up rather than looping when a round stops shrinking anything --
+    /// a truncated prompt beats no analysis, but only as a last resort and it is
+    /// logged.
+    async fn fit_to_context(
+        &self,
+        transcript: &str,
+        organization_name: &str,
+        language: &callmind_core::Language,
+    ) -> String {
+        // The template itself costs tokens, so measure it rather than guess.
+        let overhead = estimated_tokens(&build_language_aware_analysis_prompt(
+            "",
+            organization_name,
+            language,
+        ));
+        let budget = self.context_tokens.saturating_sub(overhead);
+        if budget == 0 {
+            tracing::warn!(
+                context_tokens = self.context_tokens,
+                overhead,
+                "the analysis prompt template alone fills the context window"
+            );
+            return transcript.to_string();
+        }
+        if estimated_tokens(transcript) <= budget {
+            return transcript.to_string();
+        }
+
+        let mut current = transcript.to_string();
+        for round in 0..MAX_COMPRESSION_ROUNDS {
+            let windows = windows_for_budget(&current, budget);
+            tracing::debug!(
+                round,
+                windows = windows.len(),
+                tokens = estimated_tokens(&current),
+                budget,
+                "compressing a transcript that does not fit the context window"
+            );
+
+            let mut compressed = String::new();
+            for window in &windows {
+                let summary = match self
+                    .llm
+                    .generate_text(
+                        &build_window_compression_prompt(window, language),
+                        Some(CONVERSATION_ANALYSIS_SYSTEM_PROMPT),
+                    )
+                    .await
+                {
+                    Ok(text) => text,
+                    Err(e) => {
+                        // Keeping the window verbatim is better than losing it;
+                        // a later round may still bring the total down.
+                        tracing::warn!("Window compression failed ({e}); keeping it verbatim");
+                        (*window).to_string()
+                    }
+                };
+                let _ = writeln!(compressed, "{}", summary.trim());
+            }
+
+            if estimated_tokens(&compressed) <= budget {
+                return compressed;
+            }
+            if compressed.len() >= current.len() {
+                tracing::warn!(
+                    "Compression stopped making progress; truncating the transcript to fit"
+                );
+                break;
+            }
+            current = compressed;
+        }
+
+        // Last resort, and now a deliberate, logged decision rather than a
+        // silent one inside the model.
+        let windows = windows_for_budget(&current, budget);
+        windows
+            .first()
+            .map_or(current.clone(), |w| (*w).to_string())
     }
 
     /// Run full conversation analysis on a transcript.
@@ -113,9 +213,16 @@ impl AnalysisEngine {
             );
         }
 
-        // 3. Prompt LLM for structured analysis
+        // 3. Prompt LLM for structured analysis, compressing first if the
+        //    transcript will not fit. Ollama drops whatever exceeds its context
+        //    window without a word: measured on this archive, a 13-minute call
+        //    formats to ~4160 tokens, so at Ollama's 2048 default about half of
+        //    it never reached the model and the summary described only what did.
+        let transcript_for_prompt = self
+            .fit_to_context(&formatted_transcript, organization_name, primary_lang)
+            .await;
         let prompt = build_language_aware_analysis_prompt(
-            &formatted_transcript,
+            &transcript_for_prompt,
             organization_name,
             primary_lang,
         );
@@ -542,5 +649,107 @@ impl AnalysisEngine {
             emotions: Some(emotions),
             created_at: Utc::now(),
         })
+    }
+}
+
+/// How many times a transcript may be summarised before the result is truncated.
+const MAX_COMPRESSION_ROUNDS: usize = 3;
+
+/// Rough token count for a piece of transcript.
+///
+/// Deliberately pessimistic: three characters per token rather than the four
+/// usually quoted for English, because Hebrew and Cyrillic tokenize worse and
+/// under-estimating here is what silently truncates a call.
+fn estimated_tokens(text: &str) -> usize {
+    text.chars().count().div_ceil(3)
+}
+
+/// Split a formatted transcript into pieces that each fit the token budget.
+///
+/// Cuts on line boundaries, so a speaker turn is never severed mid-sentence. A
+/// single line larger than the budget is emitted alone rather than dropped --
+/// losing transcript is the failure this exists to prevent.
+fn windows_for_budget(transcript: &str, budget_tokens: usize) -> Vec<&str> {
+    if transcript.is_empty() {
+        return vec![transcript];
+    }
+
+    let mut windows = Vec::new();
+    let mut start = 0usize;
+    let mut used = 0usize;
+    let mut cursor = 0usize;
+
+    while cursor < transcript.len() {
+        let rest = &transcript[cursor..];
+        let line_len = rest.find('\n').map_or(rest.len(), |i| i + 1);
+        let line = &rest[..line_len];
+        let cost = estimated_tokens(line);
+
+        // Cut before this line when it would overflow a window that already
+        // holds something. An oversized line with nothing before it goes out on
+        // its own.
+        if used > 0 && used + cost > budget_tokens {
+            windows.push(&transcript[start..cursor]);
+            start = cursor;
+            used = 0;
+        }
+
+        used += cost;
+        cursor += line_len;
+    }
+
+    if start < transcript.len() {
+        windows.push(&transcript[start..]);
+    }
+    windows
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    /// A transcript that fits the budget is analysed whole, in one piece.
+    #[test]
+    fn a_short_transcript_is_one_window() {
+        let transcript = "[0] (00:00) agent: короткая реплика\n";
+        let windows = windows_for_budget(transcript, 8192);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0], transcript);
+    }
+
+    /// The bug this exists for: a long call used to be handed to the model whole
+    /// and silently cut to the context window, so the analysis described the
+    /// opening minutes. Every window must fit, and no line may be lost.
+    #[test]
+    fn a_long_transcript_is_split_into_windows_that_fit() {
+        let line = "[0] (00:00) customer: одна реплика примерно такой длины\n";
+        let transcript = line.repeat(4000);
+        let budget = 512;
+
+        let windows = windows_for_budget(&transcript, budget);
+
+        assert!(windows.len() > 1, "expected a split, got {}", windows.len());
+        for (i, w) in windows.iter().enumerate() {
+            assert!(
+                estimated_tokens(w) <= budget,
+                "window {i} is {} tokens, over the {budget} budget",
+                estimated_tokens(w)
+            );
+        }
+        assert_eq!(
+            windows.concat(),
+            transcript,
+            "splitting must not drop or duplicate any part of the transcript"
+        );
+    }
+
+    /// A single line longer than the budget still has to go somewhere rather
+    /// than being dropped or looping forever.
+    #[test]
+    fn an_oversized_single_line_is_kept() {
+        let line = format!("{}\n", "x".repeat(10_000));
+        let windows = windows_for_budget(&line, 16);
+        assert_eq!(windows.concat(), line);
+        assert!(!windows.is_empty());
     }
 }

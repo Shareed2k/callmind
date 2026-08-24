@@ -303,3 +303,47 @@ pub trait SearchIndex: Send + Sync {
     async fn search(&self, query: &SearchQuery<'_>) -> Result<Vec<SearchHit>, DbError>;
     async fn delete(&self, call_id: CallId) -> Result<(), DbError>;
 }
+
+/// One speaker of one call, with the voice print that identifies them.
+pub struct StoredSpeaker {
+    pub speaker_id: callmind_core::SpeakerId,
+    pub embedding: Vec<f32>,
+    /// Set once somebody names this voice; that is what makes it recognisable in
+    /// a later call.
+    pub name: Option<String>,
+}
+
+/// Voice prints, kept so a speaker can be recognised across calls.
+///
+/// Its own trait rather than more methods on [`CallRepository`] because it is a
+/// different concern -- and because embeddings are biometric data, which is
+/// easier to reason about when the surface that touches them is small.
+///
+/// There is deliberately no separate table of profiles: a profile is an
+/// embedding with a name on it. Naming the same voice in several calls leaves
+/// several exemplars, and the nearest one wins, which handles the same person on
+/// a different handset better than one averaged vector.
+#[async_trait]
+pub trait SpeakerRepository: Send + Sync {
+    /// Record a speaker's voice print, replacing any previous one for that
+    /// speaker. A call is reprocessed often; one row per speaker.
+    async fn save_speaker_embedding(
+        &self,
+        call_id: CallId,
+        speaker_id: callmind_core::SpeakerId,
+        embedding: &[f32],
+    ) -> Result<(), DbError>;
+
+    async fn speakers_for_call(&self, call_id: CallId) -> Result<Vec<StoredSpeaker>, DbError>;
+
+    /// Give a voice a name, which turns it into an exemplar for later calls.
+    async fn name_speaker(
+        &self,
+        call_id: CallId,
+        speaker_id: callmind_core::SpeakerId,
+        name: &str,
+    ) -> Result<(), DbError>;
+
+    /// Every named voice in an organization, as `(name, embedding)`.
+    async fn list_named_speakers(&self, org_id: OrgId) -> Result<Vec<(String, Vec<f32>)>, DbError>;
+}

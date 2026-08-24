@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use callmind_api::{AppState, create_router};
 use callmind_config::AppConfig;
@@ -113,13 +113,15 @@ async fn main() -> Result<()> {
 }
 
 async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
-    init_tracing();
+    // The format comes from the config, so the subscriber is installed after it
+    // is loaded rather than before.
     info!("Starting CallMind Server v{}", env!("CARGO_PKG_VERSION"));
 
     let config = Arc::new(
         AppConfig::load_from_file_or_default(config_path)
             .context("Failed to load configuration")?,
     );
+    init_tracing_with(config.logging.format);
 
     // One connection for whichever backend the config names. Every repository
     // builds its SQL with sea-query, so nothing below this line knows or cares.
@@ -152,8 +154,45 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
             ),
         };
 
-    // Initialize AI and Processing Subsystems
-    let vad = Arc::new(callmind_vad::EnergyVadEngine::default());
+    // Initialize AI and Processing Subsystems.
+    //
+    // Speaker segmentation, when its model is present, is both a better speech
+    // detector and the source of the speaker count. Loaded once and shared: the
+    // diarizer uses it for both, and language identification -- which probes a
+    // few windows of speech to choose a Whisper model -- gets regions that are
+    // actually speech rather than possibly hold music. Speech-to-text is given
+    // the whole recording either way.
+    let segmentation_model = config
+        .models
+        .models_dir
+        .join("diarization/segmentation.onnx");
+    let segmenter = if segmentation_model.exists() {
+        match callmind_diarization::pyannote::PyannoteSegmenter::load(&segmentation_model) {
+            Ok(loaded) => {
+                info!(
+                    "Loaded pyannote speaker segmentation from {}; speech detection and the \
+                     speaker count are measured rather than assumed",
+                    segmentation_model.display()
+                );
+                Some(Arc::new(loaded))
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load speaker segmentation from {}: {e}. Falling back to the \
+                     energy detector and the two-party prior.",
+                    segmentation_model.display()
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let vad: Arc<dyn callmind_vad::VadEngine> = match segmenter.clone() {
+        Some(seg) => Arc::new(callmind_diarization::pyannote::PyannoteVad::new(seg)),
+        None => Arc::new(callmind_vad::EnergyVadEngine::default()),
+    };
 
     let hebrew_model_path = config
         .models
@@ -214,31 +253,11 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         vad.clone(),
     );
 
-    // Speaker segmentation, if the model has been exported. It is what lets the
-    // speaker count come from the audio instead of a two-party assumption --
-    // measured on labelled recordings at 4/4 monologues and 23/24 two-party
-    // calls, against 0/4 and 24/24 for the assumption. Absent, everything works
-    // as before. See scripts/export_pyannote_segmentation.py.
-    let segmentation_model = config
-        .models
-        .models_dir
-        .join("diarization/segmentation.onnx");
-    if segmentation_model.exists() {
-        match callmind_diarization::pyannote::PyannoteSegmenter::load(&segmentation_model) {
-            Ok(segmenter) => {
-                info!(
-                    "Loaded pyannote speaker segmentation from {}; the speaker count \
-                     will be measured rather than assumed",
-                    segmentation_model.display()
-                );
-                neural_diarizer = neural_diarizer.with_segmenter(Arc::new(segmenter));
-            }
-            Err(e) => warn!(
-                "Failed to load speaker segmentation from {}: {e}. Falling back to the \
-                 two-party prior.",
-                segmentation_model.display()
-            ),
-        }
+    // Measured on labelled recordings: with segmentation the speaker count comes
+    // out 4/4 on monologues and 23/24 on two-party calls, against 0/4 and 24/24
+    // for the two-party assumption it replaces.
+    if let Some(seg) = segmenter {
+        neural_diarizer = neural_diarizer.with_segmenter(seg);
     }
     let clustering_diarizer = Arc::new(neural_diarizer);
 
@@ -259,11 +278,24 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         (*search_engine).clone(),
         llm_engine.clone(),
     ));
-    let analysis_engine = Arc::new(callmind_analysis::AnalysisEngine::new(llm_engine));
+    // The analyser needs the same budget the model was given, or it cannot know
+    // when a transcript will be cut.
+    let analysis_engine = Arc::new(
+        callmind_analysis::AnalysisEngine::new(llm_engine)
+            .with_context_tokens(config.llm.context_tokens),
+    );
 
     // Initialize Complete End-to-End Pipeline Handler
+    // Plugins wire themselves in. The list is the only place a plugin is named:
+    // closed-source ones are added here behind a Cargo feature, which is the
+    // right linkage model given Rust has no stable ABI. Nothing below knows how
+    // many there are.
+    let plugins: Vec<Arc<dyn callmind_plugin_api::Plugin>> = Vec::new();
+
     let pipeline_handler = CallPipelineHandler {
         call_repo: call_repo.clone(),
+        speaker_repo: call_repo.clone(),
+        plugins: plugins.clone(),
         storage: storage.clone(),
         transcriber,
         analyzer: analysis_engine.clone(),
@@ -272,9 +304,17 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
 
     // Initialize Job Registry & Worker Pool
     let cancellation_token = CancellationToken::new();
-    let registry = JobRegistry::builder()
-        .register(JobKind::IngestRecording, pipeline_handler)
-        .build();
+    let mut registry_builder =
+        JobRegistry::builder().register(JobKind::IngestRecording, pipeline_handler);
+    for plugin in &plugins {
+        info!(
+            "Loading plugin '{}' (job kind {})",
+            plugin.name(),
+            plugin.job_kind().as_str()
+        );
+        registry_builder = plugin.register_jobs(registry_builder);
+    }
+    let registry = registry_builder.build();
 
     let mut worker_pool = WorkerPool::new(
         job_repo.clone(),
@@ -314,10 +354,22 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     // Initialize REST API State and Router
     // Runtime HTML templates. A plugin registers its own view here at startup;
     // built-in views are compiled in but still rendered at runtime.
-    let templates = Arc::new(callmind_ui::templates::TemplateRegistry::new());
+    let mut template_registry = callmind_ui::templates::TemplateRegistry::new();
+    for plugin in &plugins {
+        // A plugin with no view is the common case, so a failure here is the
+        // plugin's problem and not a reason to refuse to start.
+        if let Err(e) = plugin.register_ui(&mut template_registry) {
+            warn!(
+                "Plugin '{}' failed to register its view: {e}",
+                plugin.name()
+            );
+        }
+    }
+    let templates = Arc::new(template_registry);
 
     let app_state = AppState::new(
         config.clone(),
+        call_repo.clone(),
         call_repo.clone(),
         job_repo.clone(),
         stats_repo,
@@ -945,11 +997,30 @@ fn run_version() -> Result<()> {
 }
 
 fn init_tracing() {
+    init_tracing_with(callmind_config::LogFormat::default());
+}
+
+/// Install the log subscriber in the requested format.
+///
+/// JSON is what lets a log aggregator group by stage and call rather than
+/// leaving a human to grep prose. The `json` feature was already a declared
+/// dependency and simply unused.
+fn init_tracing_with(format: callmind_config::LogFormat) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,callmind=debug,tower_http=debug"));
 
-    let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer())
-        .try_init();
+    let registry = tracing_subscriber::registry().with(filter);
+    let _ = match format {
+        callmind_config::LogFormat::Text => registry
+            .with(tracing_subscriber::fmt::layer().boxed())
+            .try_init(),
+        callmind_config::LogFormat::Json => registry
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_current_span(true)
+                    .boxed(),
+            )
+            .try_init(),
+    };
 }
