@@ -97,6 +97,54 @@ fn is_degenerate(text: &str) -> bool {
     distinct.len() * 3 <= words.len()
 }
 
+/// Whether generated prose wandered out of the alphabets this project handles.
+///
+/// A local model drifts toward its dominant language mid-answer: qwen2.5:7b
+/// finished a Hebrew summary in Chinese, and the JSON stayed valid and the text
+/// did not repeat, so neither the retry in the LLM engine nor
+/// [`is_degenerate`] noticed. One archived analysis carried 33 CJK characters
+/// among 194 letters.
+///
+/// Latin inside Hebrew or Russian is ordinary -- product names, model numbers --
+/// so only Hebrew, Latin, Cyrillic and Arabic count as at home here. A lone
+/// stray character is cosmetic and a summary may legitimately quote a foreign
+/// name, so a run is what counts: at least three characters and more than two
+/// percent of the letters, which is well under the 17% that reached the archive.
+fn has_foreign_script(text: &str) -> bool {
+    const MIN_RUN: usize = 3;
+    const MAX_SHARE: f32 = 0.02;
+
+    let mut letters = 0usize;
+    let mut foreign = 0usize;
+
+    for ch in text.chars() {
+        if !ch.is_alphabetic() {
+            continue;
+        }
+        letters += 1;
+        if !is_expected_script(ch) {
+            foreign += 1;
+        }
+    }
+
+    foreign >= MIN_RUN && foreign as f32 > MAX_SHARE * letters as f32
+}
+
+/// Whether a letter belongs to an alphabet this project transcribes into.
+///
+/// Checked by block rather than by Unicode script property, which the standard
+/// library does not expose, and which is not worth a dependency for four ranges.
+fn is_expected_script(ch: char) -> bool {
+    ch.is_ascii_alphabetic()
+        || matches!(ch,
+            '\u{00C0}'..='\u{024F}'   // Latin, accented
+            | '\u{0400}'..='\u{052F}' // Cyrillic
+            | '\u{0590}'..='\u{05FF}' // Hebrew
+            | '\u{0600}'..='\u{06FF}' // Arabic
+            | '\u{0750}'..='\u{077F}' // Arabic supplement
+        )
+}
+
 impl AnalysisEngine {
     pub fn new(llm: Arc<dyn LlmEngine>) -> Self {
         Self {
@@ -301,8 +349,9 @@ impl AnalysisEngine {
                 let final_summary = if parsed_summary.contains("misunderstandings,")
                     || parsed_summary.contains("neither nor")
                     || is_degenerate(&parsed_summary)
+                    || has_foreign_script(&parsed_summary)
                 {
-                    warn!("Model returned a degenerate summary; using the transcript instead");
+                    warn!("Model returned an unusable summary; using the transcript instead");
                     heuristic.summary.clone()
                 } else {
                     parsed_summary
@@ -310,7 +359,7 @@ impl AnalysisEngine {
 
                 let final_title = raw
                     .title
-                    .filter(|t| !is_degenerate(t))
+                    .filter(|t| !is_degenerate(t) && !has_foreign_script(t))
                     .filter(|t| {
                         !t.eq_ignore_ascii_case("Conversation")
                             && !t.eq_ignore_ascii_case("Customer Service Call")
@@ -823,5 +872,49 @@ mod degenerate_output_tests {
         ] {
             assert!(!is_degenerate(real), "should be kept: {real}");
         }
+    }
+}
+
+#[cfg(test)]
+mod foreign_script_tests {
+    use super::*;
+
+    /// qwen2.5:7b drifts out of Hebrew into its dominant language mid-answer.
+    /// The JSON stays valid and the text does not repeat, so neither the retry
+    /// in the LLM engine nor the degeneracy check sees it -- one archived
+    /// analysis carries 33 CJK characters among 194 letters.
+    #[test]
+    fn an_answer_that_wandered_into_another_script_is_rejected() {
+        for drifted in [
+            "הלקוח שאל אם יש במלאי את הדגם Asus New 14 Ultra 7 וקיבל תשובה肯定，以下是中文翻译结果：",
+            "客户询问了华硕笔记本电脑的库存情况",
+        ] {
+            assert!(has_foreign_script(drifted), "should be rejected: {drifted}");
+        }
+    }
+
+    /// Latin inside Hebrew or Russian is ordinary -- product names, model
+    /// numbers, a company written in its own alphabet. Rejecting those would
+    /// throw away correct analyses, which is worse than the drift.
+    #[test]
+    fn the_languages_this_project_handles_are_left_alone() {
+        for real in [
+            "הלקוח שאל אם יש במלאי את המודל Asus New 14 Ultra 7 ותשלום במזומן.",
+            "Разговор о полете в Китай, договоренности о смене и охране.",
+            "The customer asked about the order and the courier had already arrived.",
+            "שעות פעילות החברה בין 9:00 ל-18:30",
+            "",
+        ] {
+            assert!(!has_foreign_script(real), "should be kept: {real}");
+        }
+    }
+
+    /// A single stray character is cosmetic, and a summary can legitimately
+    /// quote a foreign name. What matters is a run of it.
+    #[test]
+    fn a_lone_stray_character_is_not_worth_discarding_an_analysis_over() {
+        let mostly_hebrew =
+            "הלקוח ביקש הזמנה טלפונית ותשלום במזומן, וגם שאל על זיכרונות DDR5 ו받ה במלאי";
+        assert!(!has_foreign_script(mostly_hebrew));
     }
 }
