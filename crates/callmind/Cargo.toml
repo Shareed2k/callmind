@@ -31,6 +31,7 @@ callmind-jobs.workspace = true
 callmind-llm.workspace = true
 callmind-analysis.workspace = true
 callmind-search.workspace = true
+callmind-plugin-api.workspace = true
 callmind-api.workspace = true
 callmind-ui.workspace = true
 callmind-worker-proto.workspace = true

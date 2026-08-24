@@ -9,7 +9,9 @@ use callmind_db::{
 
 #[tokio::test]
 async fn test_sqlite_call_and_job_repositories() {
-    let pool = create_sqlite_pool(":memory:", 5).await.unwrap();
+    let pool = create_sqlite_pool(":memory:", 5, std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
     run_migrations(&pool).await.unwrap();
 
     let call_repo = SqlCallRepository::new(orm_connection(&pool));
@@ -116,7 +118,9 @@ async fn test_sqlite_call_and_job_repositories() {
 /// pass a literal "Organization", which is not even the seeded default name.
 #[tokio::test]
 async fn test_get_organization_name() {
-    let pool = create_sqlite_pool(":memory:", 5).await.unwrap();
+    let pool = create_sqlite_pool(":memory:", 5, std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
     run_migrations(&pool).await.unwrap();
     let repo = SqlCallRepository::new(orm_connection(&pool));
 
@@ -154,7 +158,9 @@ async fn test_get_organization_name() {
 /// the worker, duplicated five times and bypassing these repositories.
 #[tokio::test]
 async fn test_orphan_reconciliation_and_requeue() {
-    let pool = create_sqlite_pool(":memory:", 5).await.unwrap();
+    let pool = create_sqlite_pool(":memory:", 5, std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
     run_migrations(&pool).await.unwrap();
     let call_repo = SqlCallRepository::new(orm_connection(&pool));
     let job_repo = SqlJobRepository::new(orm_connection(&pool));
@@ -237,7 +243,9 @@ async fn test_orphan_reconciliation_and_requeue() {
 /// reused on a retry instead of being redone.
 #[tokio::test]
 async fn test_transcript_is_stored_and_replaceable() {
-    let pool = create_sqlite_pool(":memory:", 5).await.unwrap();
+    let pool = create_sqlite_pool(":memory:", 5, std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
     run_migrations(&pool).await.unwrap();
     let repo = SqlCallRepository::new(orm_connection(&pool));
 

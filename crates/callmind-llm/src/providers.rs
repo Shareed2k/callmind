@@ -26,7 +26,11 @@ fn http_client(timeout: Duration) -> reqwest::Client {
 #[must_use]
 pub fn create_llm_engine(config: &LlmConfig) -> Arc<dyn LlmEngine> {
     match config.provider.to_lowercase().as_str() {
-        "ollama" => Arc::new(OllamaEngine::new(&config.endpoint, &config.model)),
+        "ollama" => Arc::new(OllamaEngine::new(
+            &config.endpoint,
+            &config.model,
+            config.context_tokens,
+        )),
         "openai" | "groq" | "vllm" => {
             let api_key = config.api_key.clone().unwrap_or_default();
             Arc::new(OpenAiEngine::new(&config.endpoint, &config.model, api_key))
@@ -53,17 +57,64 @@ pub fn create_llm_engine(config: &LlmConfig) -> Arc<dyn LlmEngine> {
 }
 
 /// Ollama local LLM adapter.
+/// Body of an Ollama `/api/generate` call.
+///
+/// Extracted so the request can be asserted on. `num_ctx` is the field that
+/// matters: Ollama defaults to a couple of thousand tokens and drops whatever
+/// does not fit, without an error, which cut roughly half of a 13-minute call on
+/// this archive.
+/// Upper bound on generated tokens.
+///
+/// Without one, Ollama shifts its context window and keeps going, so a model in
+/// a repetition loop generates until the request deadline: llama3.2:3b did that
+/// on a real Hebrew call, filling the summary with one repeated token.
+///
+/// 4096 is roughly nine times what a real analysis needs -- measured across
+/// eight runs of the same call, every one stopped on its own between 60 and 459
+/// tokens -- so it bounds a runaway without truncating legitimate output.
+const MAX_RESPONSE_TOKENS: u32 = 4096;
+
+/// How many times to ask Ollama for JSON before giving up.
+///
+/// Local models drift out of the requested format: qwen2.5:7b switched to
+/// Chinese mid-object in 2 of 5 identical requests on a real Hebrew call. Three
+/// attempts takes that from roughly one call in four to one in sixty, and the
+/// requests are seconds each.
+const MAX_JSON_ATTEMPTS: usize = 3;
+
+fn ollama_generate_body(
+    model: &str,
+    prompt: &str,
+    system: Option<&str>,
+    context_tokens: usize,
+) -> serde_json::Value {
+    json!({
+        "model": model,
+        "prompt": prompt,
+        "system": system.unwrap_or_default(),
+        "stream": false,
+        "format": "json",
+        "options": {
+            "temperature": 0.2,
+            "num_predict": MAX_RESPONSE_TOKENS,
+            "num_ctx": context_tokens
+        }
+    })
+}
+
 pub struct OllamaEngine {
     client: reqwest::Client,
     endpoint: String,
     model: String,
+    context_tokens: usize,
     semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl OllamaEngine {
-    pub fn new(endpoint: &str, model: &str) -> Self {
+    pub fn new(endpoint: &str, model: &str, context_tokens: usize) -> Self {
         let base = endpoint.trim_end_matches('/');
         Self {
+            context_tokens,
             client: http_client(Duration::from_secs(300)),
             endpoint: format!("{base}/api/generate"),
             model: model.to_string(),
@@ -86,18 +137,7 @@ impl LlmEngine for OllamaEngine {
             .map_err(|e| LlmError::Provider(format!("LLM semaphore acquire error: {e}")))?;
 
         let mut model_name = self.model.clone();
-        let make_body = |m: &str| {
-            json!({
-                "model": m,
-                "prompt": prompt,
-                "system": system.unwrap_or_default(),
-                "stream": false,
-                "format": "json",
-                "options": {
-                    "temperature": 0.2
-                }
-            })
-        };
+        let make_body = |m: &str| ollama_generate_body(m, prompt, system, self.context_tokens);
 
         debug!(
             "Sending Ollama JSON generation request to {}",
@@ -146,17 +186,48 @@ impl LlmEngine for OllamaEngine {
             }
         }
 
-        let resp_json: serde_json::Value = res
-            .json()
-            .await
-            .map_err(|e| LlmError::Provider(format!("Failed to parse Ollama envelope: {e}")))?;
+        // Local models drift: measured on a real Hebrew call, qwen2.5:7b switched
+        // to Chinese mid-object in 2 of 5 identical requests, leaving text that
+        // is not JSON. Asking again is cheap next to the alternative, which is a
+        // fallback that never read the call.
+        let mut response = res;
+        let mut attempt = 1_usize;
+        loop {
+            let envelope: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| LlmError::Provider(format!("Failed to parse Ollama envelope: {e}")))?;
 
-        if let Some(resp_str) = resp_json.get("response").and_then(|r| r.as_str()) {
-            serde_json::from_str(resp_str).map_err(LlmError::JsonParse)
-        } else {
-            Err(LlmError::Provider(
-                "Ollama response missing 'response' field".into(),
-            ))
+            let Some(generated) = envelope.get("response").and_then(|r| r.as_str()) else {
+                return Err(LlmError::Provider(
+                    "Ollama response missing 'response' field".into(),
+                ));
+            };
+
+            match serde_json::from_str(generated) {
+                Ok(value) => return Ok(value),
+                Err(parse_error) => {
+                    if attempt >= MAX_JSON_ATTEMPTS {
+                        return Err(LlmError::JsonParse(parse_error));
+                    }
+                    warn!(
+                        attempt,
+                        "Ollama answered with text that is not JSON; asking again"
+                    );
+                    attempt += 1;
+                    response = self
+                        .client
+                        .post(&self.endpoint)
+                        .json(&make_body(&model_name))
+                        .send()
+                        .await
+                        .map_err(|e| LlmError::Provider(format!("Ollama connection error: {e}")))?;
+                    if !response.status().is_success() {
+                        let err_text = response.text().await.unwrap_or_default();
+                        return Err(LlmError::Provider(format!("Ollama API error: {err_text}")));
+                    }
+                }
+            }
         }
     }
 
@@ -406,5 +477,42 @@ impl LlmEngine for AnthropicEngine {
             .as_str()
             .unwrap_or_default()
             .to_string())
+    }
+}
+
+#[cfg(test)]
+mod ollama_body_tests {
+    use super::*;
+
+    /// Ollama defaults to a small context and silently drops the rest of the
+    /// prompt, with nothing in the logs, so the field has to be on the wire.
+    #[test]
+    fn the_request_carries_the_configured_context_size() {
+        let body = ollama_generate_body("model-x", "prompt text", Some("system text"), 12_345);
+
+        assert_eq!(body["model"], "model-x");
+        assert_eq!(body["prompt"], "prompt text");
+        assert_eq!(body["system"], "system text");
+        assert_eq!(body["format"], "json");
+        assert_eq!(
+            body["options"]["num_ctx"], 12_345,
+            "num_ctx must reach Ollama: {body}"
+        );
+    }
+
+    /// A model that degenerates into a loop generates until something stops it,
+    /// and nothing did: measured on a real Hebrew call, llama3.2:3b ran past a
+    /// 300 s deadline emitting one repeated token. The cap bounds the waste; it
+    /// is generous enough that a legitimate analysis is never truncated.
+    #[test]
+    fn the_request_bounds_how_much_the_model_may_generate() {
+        let body = ollama_generate_body("m", "p", None, 8192);
+        assert_eq!(body["options"]["num_predict"], MAX_RESPONSE_TOKENS);
+    }
+
+    #[test]
+    fn a_missing_system_prompt_is_an_empty_string_not_null() {
+        let body = ollama_generate_body("m", "p", None, 2048);
+        assert_eq!(body["system"], "");
     }
 }

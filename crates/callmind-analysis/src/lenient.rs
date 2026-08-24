@@ -26,12 +26,29 @@ use serde_json::Value;
 /// sentence punctuation is joined with a space, anything else with `"; "`, so a
 /// bullet list reads as a sentence without inventing punctuation that was not
 /// there.
+/// Whether a string is a model writing out "I have no value" instead of
+/// emitting JSON null.
+///
+/// One archived call carried the literal four-character title "null" on its page
+/// because of this. Matched only when the whole field is that word, so a title
+/// like "none of the parts arrived" is left alone.
+fn is_written_absence(value: &str) -> bool {
+    matches!(
+        value.to_lowercase().as_str(),
+        "null" | "none" | "nil" | "n/a" | "na" | "undefined" | "unknown" | "-"
+    )
+}
+
 fn to_prose(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
         Value::String(s) => {
             let trimmed = s.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
+            if trimmed.is_empty() || is_written_absence(trimmed) {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
         }
         Value::Bool(b) => Some(b.to_string()),
         Value::Number(n) => Some(n.to_string()),
@@ -228,5 +245,53 @@ mod tests {
             describe_shape(&Value::Array(vec![])),
             "<top level is array>"
         );
+    }
+}
+
+#[cfg(test)]
+mod placeholder_word_tests {
+    use super::*;
+
+    #[derive(serde::Deserialize)]
+    struct Analysis {
+        #[serde(default, deserialize_with = "string")]
+        title: Option<String>,
+    }
+
+    /// A model asked for a value it does not have writes the word out as a
+    /// string instead of emitting JSON null. One archived call has the literal
+    /// four-character title "null" on its page because of it.
+    #[test]
+    fn the_word_a_model_writes_for_an_absent_value_counts_as_absent() {
+        for written in [
+            r#"{"title": "null"}"#,
+            r#"{"title": "NULL"}"#,
+            r#"{"title": "none"}"#,
+            r#"{"title": "N/A"}"#,
+            r#"{"title": "undefined"}"#,
+            r#"{"title": null}"#,
+            r#"{}"#,
+        ] {
+            let parsed: Analysis = serde_json::from_str(written).expect("parses");
+            assert_eq!(parsed.title, None, "{written}");
+        }
+    }
+
+    /// Only the bare word, so real text is never thrown away.
+    #[test]
+    fn a_title_that_merely_contains_the_word_survives() {
+        for (written, expected) in [
+            (
+                r#"{"title": "Nullsoft installer support call"}"#,
+                "Nullsoft installer support call",
+            ),
+            (
+                r#"{"title": "none of the parts arrived"}"#,
+                "none of the parts arrived",
+            ),
+        ] {
+            let parsed: Analysis = serde_json::from_str(written).expect("parses");
+            assert_eq!(parsed.title.as_deref(), Some(expected));
+        }
     }
 }

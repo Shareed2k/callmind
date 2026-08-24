@@ -88,9 +88,13 @@ async fn test_full_pipeline_e2e_real_audio() {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("e2e_pipeline.db");
-    let pool = create_sqlite_pool(db_path.to_str().unwrap(), 5)
-        .await
-        .unwrap();
+    let pool = create_sqlite_pool(
+        db_path.to_str().unwrap(),
+        5,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
     run_migrations(&pool).await.unwrap();
 
     let storage_dir = temp_dir.path().join("recordings");
@@ -215,6 +219,7 @@ async fn test_full_pipeline_e2e_real_audio() {
     // worker pools against the same wiring.
     let make_registry = {
         let call_repo = call_repo.clone();
+        let webhook_queue: Arc<dyn JobRepository> = job_repo.clone();
         let storage = storage.clone();
         let transcriber = transcriber.clone();
         let analysis_engine = analysis_engine.clone();
@@ -225,6 +230,9 @@ async fn test_full_pipeline_e2e_real_audio() {
                     JobKind::IngestRecording,
                     CallPipelineHandler {
                         call_repo: call_repo.clone(),
+                        speaker_repo: call_repo.clone(),
+                        webhook_queue: Some(webhook_queue.clone()),
+                        plugins: Vec::new(),
                         storage: storage.clone(),
                         transcriber: transcriber.clone(),
                         analyzer: analysis_engine.clone(),
@@ -297,6 +305,26 @@ async fn test_full_pipeline_e2e_real_audio() {
 
     assert!(!ask_res.citations.is_empty());
     assert_eq!(ask_res.citations[0].call_id, call.id);
+
+    // 7. A completed call is offered to the outbound webhook as its own job.
+    //
+    // Its own job, not a call at the end of the pipeline, so a receiver that is
+    // down costs a retry rather than a re-run of transcription and analysis. The
+    // payload is the request body, so every retry delivers identical bytes.
+    let delivery = job_repo
+        .fetch_and_lock("webhook-assert", &[JobKind::DeliverWebhook])
+        .await
+        .unwrap()
+        .expect("a completed call must enqueue its delivery");
+    assert_eq!(delivery.call_id, Some(call.id));
+    assert_eq!(delivery.payload["event"], "call.completed");
+    assert_eq!(delivery.payload["call_id"], call.id.to_string());
+    assert_eq!(delivery.payload["title"], "Customer Service Inquiry");
+    assert!(
+        delivery.payload["summary"].is_string(),
+        "a receiver wants the summary without calling back: {}",
+        delivery.payload
+    );
 
     // 7. A retry must reuse the stored transcript rather than transcribing again.
     //

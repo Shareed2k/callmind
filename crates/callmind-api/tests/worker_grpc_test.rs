@@ -38,7 +38,9 @@ struct Fixture {
 }
 
 async fn start() -> Fixture {
-    let pool = create_sqlite_pool(":memory:", 5).await.unwrap();
+    let pool = create_sqlite_pool(":memory:", 5, std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
     run_migrations(&pool).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()).await.unwrap());
@@ -90,6 +92,7 @@ async fn start() -> Fixture {
     let llm = Arc::new(MockLlmEngine::default());
     let state = AppState::new(
         Arc::new(AppConfig::default()),
+        call_repo.clone(),
         call_repo.clone(),
         job_repo.clone(),
         stats_repo.clone(),

@@ -7,9 +7,14 @@ use std::time::Duration;
 use tracing::info;
 
 /// Create and configure a SQLite connection pool with production-ready pragmas.
+///
+/// `busy_timeout` is how long a writer waits for a lock before giving up. It is
+/// a parameter rather than a constant because under contention it decides
+/// whether a job fails with "database is locked" or simply waits.
 pub async fn create_sqlite_pool(
     database_url: &str,
     max_connections: u32,
+    busy_timeout: Duration,
 ) -> Result<SqlitePool, DbError> {
     // If it's a file path, ensure the parent directory exists
     if database_url != ":memory:" && !database_url.starts_with("sqlite::memory:") {
@@ -38,7 +43,7 @@ pub async fn create_sqlite_pool(
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .foreign_keys(true)
-        .busy_timeout(Duration::from_secs(5));
+        .busy_timeout(busy_timeout);
 
     let pool = SqlitePoolOptions::new()
         .max_connections(max_connections)
@@ -61,10 +66,11 @@ pub async fn connect(
     driver: &str,
     url: &str,
     max_connections: u32,
+    busy_timeout: Duration,
 ) -> Result<sea_orm_migration::sea_orm::DatabaseConnection, DbError> {
     match driver.to_lowercase().as_str() {
         "sqlite" => Ok(orm_connection(
-            &create_sqlite_pool(url, max_connections).await?,
+            &create_sqlite_pool(url, max_connections, busy_timeout).await?,
         )),
         "postgres" | "postgresql" => {
             let mut options = sea_orm_migration::sea_orm::ConnectOptions::new(url.to_string());
@@ -116,4 +122,28 @@ pub async fn run_migrations_on(
         .map_err(|e| DbError::MigrationFailed(e.to_string()))?;
     info!("Database migrations applied successfully");
     Ok(())
+}
+
+#[cfg(test)]
+mod busy_timeout_tests {
+    use super::*;
+
+    /// `database.busy_timeout_ms` was config surface with nothing behind it:
+    /// declared, defaulted and documented, while this module hardcoded five
+    /// seconds. Under write contention that is the setting that decides whether
+    /// a job fails with "database is locked" or waits, so a knob that lies about
+    /// it is worse than no knob.
+    #[tokio::test]
+    async fn the_configured_busy_timeout_reaches_sqlite() {
+        let pool = create_sqlite_pool(":memory:", 1, Duration::from_millis(1234))
+            .await
+            .expect("pool");
+
+        let timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(&pool)
+            .await
+            .expect("pragma");
+
+        assert_eq!(timeout, 1234, "SQLite must report the configured wait");
+    }
 }

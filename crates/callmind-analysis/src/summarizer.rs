@@ -14,216 +14,150 @@ pub struct HeuristicSummary {
 }
 
 impl ConversationSummarizer {
-    /// Generate a coherent structured summary and topic breakdown from transcript text.
+    /// A stand-in used when the model fails, and to fill single fields it left
+    /// out. It states only what the transcript states.
+    ///
+    /// It used to match keywords onto canned templates, which asserted things the
+    /// recording never said: a call about buying a laptop, containing the word
+    /// "order" once, came back titled "delivery coordination and courier arrival"
+    /// with the resolution "delivery details were successfully coordinated". None
+    /// of it was in the audio, and because the analyzer also uses this to fill
+    /// missing fields, the invention reached otherwise-correct analyses.
+    ///
+    /// Anything that cannot be known without reading the call is `None`. An empty
+    /// field is a correct answer; a plausible guess is a wrong one.
     #[must_use]
     pub fn summarize(transcript: &Transcript, primary_lang: &Language) -> HeuristicSummary {
-        let full_text = transcript.full_text().to_lowercase();
-        let num_segments = transcript.segments.len();
-
-        match primary_lang {
-            Language::Russian => Self::summarize_russian(&full_text, transcript, num_segments),
-            Language::Hebrew => Self::summarize_hebrew(&full_text, transcript, num_segments),
-            _ => Self::summarize_english(&full_text, transcript, num_segments),
+        HeuristicSummary {
+            title: Self::label(primary_lang).to_string(),
+            summary: Self::opening(transcript),
+            reason: None,
+            resolution: None,
+            intent: None,
+            topics: Vec::new(),
         }
     }
 
-    fn summarize_russian(
-        text: &str,
-        _transcript: &Transcript,
-        num_segments: usize,
-    ) -> HeuristicSummary {
-        if text.contains("где ты")
-            || text.contains("я здесь")
-            || text.contains("автобус")
-            || text.contains("далеко")
-            || text.contains("подъезжаю")
-        {
-            HeuristicSummary {
-                title: "Координация встречи и местоположения".to_string(),
-                summary: "Собеседники созваниваются, чтобы уточнить текущее местоположение, маршрут и скоординировать встречу.".to_string(),
-                reason: Some("Уточнение местоположения и времени встречи".to_string()),
-                resolution: Some("Участники сориентировались и договорились о встрече".to_string()),
-                intent: Some("Координация встречи".to_string()),
-                topics: vec!["Встреча".into(), "Локация".into(), "Маршрут".into()],
-            }
-        } else if text.contains("курьер")
-            || text.contains("доставка")
-            || text.contains("посылк")
-            || text.contains("заказ")
-        {
-            HeuristicSummary {
-                title: "Доставка и получение заказа".to_string(),
-                summary: "Обсуждение деталей доставки, времени прибытия курьера и передачи заказа."
-                    .to_string(),
-                reason: Some("Координация передачи доставки курьером".to_string()),
-                resolution: Some("Детали передачи согласованы".to_string()),
-                intent: Some("Доставка".to_string()),
-                topics: vec!["Доставка".into(), "Курьер".into(), "Заказ".into()],
-            }
-        } else if text.contains("не работает")
-            || text.contains("ошибк")
-            || text.contains("проблем")
-            || text.contains("сломал")
-        {
-            HeuristicSummary {
-                title: "Технические неполадки и поддержка".to_string(),
-                summary: "Обсуждение возникшей технической неисправности и шагов по её диагностике или устранению.".to_string(),
-                reason: Some("Обращение по поводу неисправности".to_string()),
-                resolution: Some("Проблема зафиксирована для решения".to_string()),
-                intent: Some("Техподдержка".to_string()),
-                topics: vec!["Техподдержка".into(), "Неисправность".into()],
-            }
-        } else if text.contains("оплат")
-            || text.contains("счет")
-            || text.contains("деньг")
-            || text.contains("банк")
-            || text.contains("чек")
-        {
-            HeuristicSummary {
-                title: "Финансовые вопросы и взаиморасчеты".to_string(),
-                summary: "Обсуждение выставленных счетов, деталей оплаты или финансовых операций."
-                    .to_string(),
-                reason: Some("Уточнение финансовых вопросов".to_string()),
-                resolution: Some("Условия оплаты согласованы".to_string()),
-                intent: Some("Финансы".to_string()),
-                topics: vec!["Оплата".into(), "Счета".into(), "Финансы".into()],
-            }
-        } else {
-            let desc = if num_segments <= 3 {
-                "Короткий телефонный разговор между собеседниками для оперативной связи."
-            } else {
-                "Телефонный разговор, в ходе которого собеседники обсудили текущие вопросы и согласовали действия."
-            };
-            HeuristicSummary {
-                title: "Телефонный разговор".to_string(),
-                summary: desc.to_string(),
-                reason: Some("Обсуждение текущих вопросов".to_string()),
-                resolution: Some("Вопросы обсуждены".to_string()),
-                intent: Some("Личная беседа".to_string()),
-                topics: vec!["Общение".into(), "Текущие вопросы".into()],
-            }
+    /// The one claim true of every recording, in the language of the call.
+    fn label(language: &Language) -> &'static str {
+        match language {
+            Language::Hebrew => "שיחה מוקלטת",
+            Language::Russian => "Записанный разговор",
+            _ => "Recorded conversation",
         }
     }
 
-    fn summarize_hebrew(
-        text: &str,
-        _transcript: &Transcript,
-        num_segments: usize,
-    ) -> HeuristicSummary {
-        if text.contains("שליח")
-            || text.contains("משלוח")
-            || text.contains("חבילה")
-            || text.contains("הזמנה")
-        {
-            HeuristicSummary {
-                title: "תיאום משלוח והגעת שליח".to_string(),
-                summary: "שיחה בנושא תיאום קבלת משלוח, כתובת ומועד הגעת השליח ללקוח.".to_string(),
-                reason: Some("תיאום מסירת משלוח".to_string()),
-                resolution: Some("פרטי המסירה תואמו בהצלחה".to_string()),
-                intent: Some("משלוחים".to_string()),
-                topics: vec!["משלוח".into(), "שליח".into(), "חבילה".into()],
+    /// The start of the conversation, verbatim, so the call is still
+    /// recognisable in a list without claiming to summarise it.
+    fn opening(transcript: &Transcript) -> String {
+        const MAX_CHARS: usize = 280;
+
+        let mut out = String::new();
+        for segment in &transcript.segments {
+            let text = segment.normalized_text.trim();
+            if text.is_empty() {
+                continue;
             }
-        } else if text.contains("איפה אתה")
-            || text.contains("אני פה")
-            || text.contains("הגעתי")
-            || text.contains("בדרך")
-        {
-            HeuristicSummary {
-                title: "תיאום מיקום ומפגש".to_string(),
-                summary: "שיחה קצרה בין הדוברים לבירור מיקום מדויק ותיאום נקודת מפגש.".to_string(),
-                reason: Some("בירור מיקום והגעה".to_string()),
-                resolution: Some("נקודת המפגש סוכמה".to_string()),
-                intent: Some("תיאום הגעה".to_string()),
-                topics: vec!["מפגש".into(), "מיקום".into()],
+            if !out.is_empty() {
+                out.push(' ');
             }
-        } else if text.contains("תקלה")
-            || text.contains("לא עובד")
-            || text.contains("בעיה")
-            || text.contains("שירות")
-        {
-            HeuristicSummary {
-                title: "בירור תקלה ותמיכה טכנית".to_string(),
-                summary: "פנייה בנוגע לתקלה טכנית או בעיה תפעולית הדורשת בדיקה וטיפול.".to_string(),
-                reason: Some("דיווח על תקלה".to_string()),
-                resolution: Some("הפנייה נרשמה להמשך טיפול".to_string()),
-                intent: Some("תמיכה טכנית".to_string()),
-                topics: vec!["תמיכה".into(), "תקלה טכנית".into()],
+            out.push_str(text);
+            if out.chars().count() >= MAX_CHARS {
+                break;
             }
-        } else if text.contains("תשלום")
-            || text.contains("חשבונית")
-            || text.contains("אשראי")
-            || text.contains("חיוב")
-        {
-            HeuristicSummary {
-                title: "בירור תשלום וחשבוניות".to_string(),
-                summary: "שיחה לבירור פרטי חיוב, אמצעי תשלום או הפקת חשבונית.".to_string(),
-                reason: Some("בירור נושאי כספים וחיובים".to_string()),
-                resolution: Some("פרטי החיוב הובהרו".to_string()),
-                intent: Some("כספים ותשלומים".to_string()),
-                topics: vec!["תשלום".into(), "חשבונית".into()],
-            }
-        } else {
-            let desc = if num_segments <= 3 {
-                "שיחה קצרה בין הדוברים לבירור ותיאום מהיר."
-            } else {
-                "שיחה שבה הדוברים דנו בנושאים שונים ותיאמו את המשך ההתנהלות."
-            };
-            HeuristicSummary {
-                title: "שיחת טלפון".to_string(),
-                summary: desc.to_string(),
-                reason: Some("בירור נושאים שוטפים".to_string()),
-                resolution: Some("הנושאים סוכמו".to_string()),
-                intent: Some("שיחה כללית".to_string()),
-                topics: vec!["שיחה".into(), "תיאום".into()],
-            }
+        }
+
+        if out.chars().count() > MAX_CHARS {
+            let mut truncated: String = out.chars().take(MAX_CHARS).collect();
+            truncated.push('…');
+            return truncated;
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod honest_fallback_tests {
+    use super::*;
+    use callmind_core::{CallId, SpeakerId, SpeakerRole};
+    use callmind_transcript::{TextDirection, TranscriptSegment};
+    use uuid::Uuid;
+
+    fn transcript(language: &Language, lines: &[&str]) -> Transcript {
+        Transcript {
+            call_id: CallId::generate(),
+            languages: Vec::new(),
+            speakers: Vec::new(),
+            segments: lines
+                .iter()
+                .enumerate()
+                .map(|(i, text)| TranscriptSegment {
+                    id: Uuid::new_v4(),
+                    call_id: CallId::generate(),
+                    sequence: u32::try_from(i).unwrap_or(0),
+                    speaker_id: SpeakerId::new(u16::try_from(i % 2).unwrap_or(0)),
+                    speaker_role: SpeakerRole::Customer,
+                    language: language.clone(),
+                    text_direction: TextDirection::Rtl,
+                    start_ms: (i as u64) * 1000,
+                    end_ms: (i as u64) * 1000 + 900,
+                    raw_text: (*text).to_string(),
+                    normalized_text: (*text).to_string(),
+                    words: Vec::new(),
+                })
+                .collect(),
         }
     }
 
-    fn summarize_english(
-        text: &str,
-        _transcript: &Transcript,
-        num_segments: usize,
-    ) -> HeuristicSummary {
-        if text.contains("where are you")
-            || text.contains("i am here")
-            || text.contains("arrived")
-            || text.contains("on my way")
-        {
-            HeuristicSummary {
-                title: "Meeting & Location Coordination".to_string(),
-                summary: "The speakers checked in to clarify current locations, route, and coordinate their arrival.".to_string(),
-                reason: Some("Arrival and location coordination".to_string()),
-                resolution: Some("Meeting location agreed upon".to_string()),
-                intent: Some("Coordination".to_string()),
-                topics: vec!["Meeting".into(), "Location".into()],
-            }
-        } else if text.contains("delivery")
-            || text.contains("courier")
-            || text.contains("package")
-            || text.contains("order")
-        {
-            HeuristicSummary {
-                title: "Package Delivery & Coordination".to_string(),
-                summary: "Discussion regarding shipment status, delivery address, and courier arrival time.".to_string(),
-                reason: Some("Package delivery coordination".to_string()),
-                resolution: Some("Delivery details confirmed".to_string()),
-                intent: Some("Delivery".to_string()),
-                topics: vec!["Delivery".into(), "Package".into()],
-            }
-        } else {
-            let desc = if num_segments <= 3 {
-                "Brief conversation between participants for quick coordination."
-            } else {
-                "Discussion between participants regarding ongoing matters and next steps."
-            };
-            HeuristicSummary {
-                title: "Recorded Conversation".to_string(),
-                summary: desc.to_string(),
-                reason: Some("General discussion".to_string()),
-                resolution: Some("Matters discussed".to_string()),
-                intent: Some("General".to_string()),
-                topics: vec!["Discussion".into()],
-            }
+    /// The keyword templates asserted things the recording never said: a call
+    /// about buying a laptop, containing the word "order" once, was titled
+    /// "delivery coordination and courier arrival" with the resolution "delivery
+    /// details were successfully coordinated" -- an invented outcome. This path
+    /// also fills individual fields the LLM left out, so the invention reached
+    /// otherwise-good analyses.
+    #[test]
+    fn it_does_not_claim_anything_the_recording_did_not_say() {
+        let call = transcript(
+            &Language::Hebrew,
+            &[
+                "שלום, יש לכם במלאי את הדגם Asus New 14 Ultra 7?",
+                "אני רוצה לבצע הזמנה טלפונית ולשלם במזומן.",
+            ],
+        );
+
+        let summary = ConversationSummarizer::summarize(&call, &Language::Hebrew);
+
+        for invented in ["שליח", "חבילה", "כתובת"] {
+            assert!(
+                !summary.title.contains(invented) && !summary.summary.contains(invented),
+                "{invented} was never said: {} / {}",
+                summary.title,
+                summary.summary
+            );
         }
+        assert!(
+            summary.resolution.is_none(),
+            "no outcome can be known without reading the call: {:?}",
+            summary.resolution
+        );
+        assert!(
+            summary.reason.is_none() && summary.intent.is_none(),
+            "a guessed reason is a wrong answer, an absent one is correct"
+        );
+        assert!(summary.topics.is_empty(), "topics require actually reading");
+    }
+
+    /// What it may say is what the transcript says, so the fallback still leaves
+    /// something a person can recognise the call by.
+    #[test]
+    fn it_quotes_the_conversation_it_was_given() {
+        let call = transcript(&Language::Russian, &["Привет, я по поводу счёта."]);
+        let summary = ConversationSummarizer::summarize(&call, &Language::Russian);
+        assert!(
+            summary.summary.contains("Привет, я по поводу счёта."),
+            "the opening is the one thing we know was said: {}",
+            summary.summary
+        );
+        assert!(!summary.title.is_empty(), "the list still needs a label");
     }
 }

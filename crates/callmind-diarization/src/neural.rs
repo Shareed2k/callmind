@@ -283,7 +283,17 @@ impl DiarizationEngine for NeuralDiarizer {
                 .max()
                 .map_or(1, |m| (m + 1) as usize);
 
-            Some(DiarizationResult::new(num_distinct_speakers, raw_turns))
+            // The embeddings are already in hand; one centroid per speaker is
+            // what makes the same voice recognisable in a later call.
+            let centroids = crate::identity::speaker_centroids(&labels, &embeddings)
+                .into_iter()
+                .map(|(label, centroid)| (SpeakerId::new(label as u16), centroid))
+                .collect();
+
+            Some(
+                DiarizationResult::new(num_distinct_speakers, raw_turns)
+                    .with_speaker_embeddings(centroids),
+            )
         })
         .await
         .map_err(|e| DiarizationError::Inference(format!("diarization task failed: {e}")))?;

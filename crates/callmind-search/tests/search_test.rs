@@ -11,9 +11,13 @@ use std::sync::Arc;
 async fn test_fts5_multilingual_search_and_ask_pipeline() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("search_test.db");
-    let pool = create_sqlite_pool(db_path.to_str().unwrap(), 5)
-        .await
-        .unwrap();
+    let pool = create_sqlite_pool(
+        db_path.to_str().unwrap(),
+        5,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
     run_migrations(&pool).await.unwrap();
 
     let call_repo = SqlCallRepository::new(orm_connection(&pool));
@@ -130,9 +134,13 @@ async fn test_fts5_multilingual_search_and_ask_pipeline() {
 async fn test_hebrew_proclitic_search_finds_prefixed_forms() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("hebrew_search.db");
-    let pool = create_sqlite_pool(db_path.to_str().unwrap(), 5)
-        .await
-        .unwrap();
+    let pool = create_sqlite_pool(
+        db_path.to_str().unwrap(),
+        5,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
     run_migrations(&pool).await.unwrap();
 
     let call_repo = SqlCallRepository::new(orm_connection(&pool));

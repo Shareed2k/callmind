@@ -16,6 +16,12 @@ database:
   # SQLite only. ponytail: not wired -- pool.rs hardcodes 5 s.
   busy_timeout_ms: 5000
 
+logging:
+  # "text" for a terminal, "json" for a log aggregator. Every pipeline stage logs
+  # `stage`, `ms` and `call_id` as fields, so "which stage ate the time" is a
+  # query rather than a grep.
+  format: "text"
+
 storage:
   driver: "filesystem"
   path: "./data/recordings"
@@ -36,15 +42,36 @@ models:
   #   `python3 scripts/export_pyannote_segmentation.py --out models/diarization/segmentation.onnx`
   #   -- the published export cannot be loaded by a pure-Rust runtime as-is.
   models_dir: "./models"
+  # Speech-to-text weights, relative to models_dir. This is the stage that costs
+  # 88.8% of processing time, so it is the one worth experimenting with:
+  #   stt/whisper-large-v3-turbo.bin  ~1.5 GB  (default) -- measured 2.2x and
+  #     2.9x faster than the full model on two real Russian calls, and the
+  #     better transcript on both: the full model lost speech into repetition
+  #     loops that turbo did not produce.
+  #   stt/whisper-large-v3.bin        ~2.9 GB  (`models download whisper-large-v3`)
+  #     the full model; try it if your language transcribes worse on turbo.
+  stt_multilingual: "stt/whisper-large-v3-turbo.bin"
+  stt_hebrew: "stt/ivrit-ai-large-v3-turbo.bin"
 
 llm:
   provider: "ollama" # "ollama", "openai", "anthropic", "heuristic"
   endpoint: "http://localhost:11434"
   # Recommended models:
   # - Hebrew specialized: "dicta-il/DictaLM-3.0-1.7B-Instruct", "yonioz123/Llama-3.2-3B-Hebrew-Master"
-  # - General multilingual: "llama3.2:3b", "qwen2.5:7b", "gpt-4o-mini", "claude-3-5-sonnet-20241022"
-  model: "llama3.2:3b"
+  # - General multilingual: "qwen2.5:7b", "gpt-4o-mini", "claude-3-5-sonnet-20241022"
+  # qwen2.5:7b is the default because llama3.2:3b degenerated into a repetition
+  # loop on a real Hebrew call -- invalid JSON, 43 s, generation stopped only by
+  # the token cap -- where qwen returned a correct Hebrew analysis in 14 s from
+  # the same prompt. Smaller models are fine for English; test yours on a real
+  # call before trusting it.
+  model: "qwen2.5:7b"
   api_key: null
+  # Tokens the model is given, sent to Ollama as `num_ctx`. Ollama defaults to a
+  # couple of thousand and drops the rest of the prompt without an error -- a
+  # 13-minute call formats to roughly 4000 tokens, so half of it was being lost.
+  # Raise it if your model and RAM allow; the analyser compresses whatever still
+  # does not fit rather than letting it be cut.
+  context_tokens: 8192
 
 auth:
   enabled: false
@@ -67,11 +94,6 @@ bots:
     allowed_numbers: [] # optional: restrict to specific senders, digits only
     result_timeout_secs: 600
 
-  slack:
-    enabled: false
-    bot_token: null # e.g. "xoxb-your-token"
-    signing_secret: null
-
   webhook:
     enabled: true
     secret_token: null # optional shared secret for incoming audio webhooks (Siri / iOS Shortcuts / n8n)
@@ -80,3 +102,15 @@ watcher:
   enabled: false
   watch_dir: "./incoming"
   poll_secs: 5
+
+# POST each finished call to an HTTP receiver (n8n, a Shortcut, anything that
+# speaks HTTP). Disabled while url is empty -- this is the one setting that sends
+# call content off the machine. Delivery is a queued job, so a receiver that is
+# down costs a retry with backoff, not a re-run of transcription.
+# Both fields also read CALLMIND_OUTBOUND_WEBHOOK_URL / _SECRET from the
+# environment, so the secret need not be written to disk.
+outbound_webhook:
+  url: ""
+  # Sent as X-CallMind-Secret so the receiver can tell the request is ours.
+  secret: ""
+  timeout_seconds: 30

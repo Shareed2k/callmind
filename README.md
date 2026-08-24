@@ -4,7 +4,7 @@
 
 **High-Performance Autonomous Conversation Intelligence Platform**
 
-[![CI](https://github.com/callmind/callmind/actions/workflows/ci.yml/badge.svg)](https://github.com/callmind/callmind/actions/workflows/ci.yml)
+[![CI](https://github.com/Shareed2k/callmind/actions/workflows/ci.yml/badge.svg)](https://github.com/Shareed2k/callmind/actions/workflows/ci.yml)
 [![Rust Version](https://img.shields.io/badge/rust-1.94%2B-blue.svg)](https://www.rust-lang.org)
 [![Edition](https://img.shields.io/badge/edition-2024-purple.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/index.html)
 [![Acceleration](https://img.shields.io/badge/GPU-Metal%20%7C%20Vulkan%20%7C%20CUDA-green.svg)](#hardware-acceleration)
@@ -81,21 +81,26 @@ CallMind supports hardware acceleration across all major platforms:
 | **Linux (Nvidia GPU)** | `cuda` | 🚀 **Nvidia RTX / Tesla / A100 / H100** (Tensor Cores) |
 | **Linux / Server (Universal)** | `cpu` | ⚡ Any x86_64 or ARM64 CPU (AVX2 / FMA / NEON) |
 
+Which of these you get prebuilt is narrower than what builds from source. Release
+archives are macOS arm64, Linux x86_64 CPU and Linux x86_64 Vulkan; the Docker
+images are linux/amd64. CUDA ships only as an image, and ARM64 Linux only as a
+source build.
+
 ---
 
 ## 📦 Quickstart
 
 ### Option 1: Pre-built Release Binaries
 
-Download the binary for your platform from [GitHub Releases](https://github.com/callmind/callmind/releases):
+Download the binary for your platform from [GitHub Releases](https://github.com/Shareed2k/callmind/releases):
 
 ```bash
 # macOS (Apple Silicon M-series)
-curl -L -o callmind.tar.gz https://github.com/callmind/callmind/releases/latest/download/callmind-macos-arm64.tar.gz
+curl -L -o callmind.tar.gz https://github.com/Shareed2k/callmind/releases/latest/download/callmind-macos-arm64.tar.gz
 tar -xzf callmind.tar.gz
 
 # Linux (x86_64 CPU)
-curl -L -o callmind.tar.gz https://github.com/callmind/callmind/releases/latest/download/callmind-linux-x86_64.tar.gz
+curl -L -o callmind.tar.gz https://github.com/Shareed2k/callmind/releases/latest/download/callmind-linux-x86_64.tar.gz
 tar -xzf callmind.tar.gz
 ```
 
@@ -105,7 +110,7 @@ Ensure you have Rust 1.94+ and `libopus` installed (`brew install opus` on macOS
 
 ```bash
 # Clone the repository
-git clone https://github.com/callmind/callmind.git
+git clone https://github.com/Shareed2k/callmind.git
 cd callmind
 
 # Build optimized release binary (default uses Apple Metal on macOS)
@@ -144,7 +149,7 @@ CallMind manages AI model weights via a built-in CLI with download resume and SH
 
 1. **Start Ollama** (or configure OpenAI / Anthropic in `callmind.yaml`):
    ```bash
-   ollama run llama3.2:3b
+   ollama run qwen2.5:7b
    ```
 
 2. **Start CallMind**:
@@ -228,9 +233,9 @@ curl -X POST "http://localhost:8080/api/v1/bots/webhook?sync=true" \
 ## 🐳 Docker & Docker Compose
 
 Pre-built Docker images are automatically published to **GitHub Container Registry (GHCR)**:
-- `ghcr.io/callmind/callmind:latest` (Universal CPU)
-- `ghcr.io/callmind/callmind:vulkan` (AMD Radeon, Intel Arc, Nvidia Vulkan GPU)
-- `ghcr.io/callmind/callmind:cuda` (Nvidia CUDA Tensor Core GPU)
+- `ghcr.io/shareed2k/callmind:latest` (Universal CPU)
+- `ghcr.io/shareed2k/callmind:vulkan` (AMD Radeon, Intel Arc, Nvidia Vulkan GPU)
+- `ghcr.io/shareed2k/callmind:cuda` (Nvidia CUDA Tensor Core GPU)
 
 Run with Docker Compose:
 
@@ -245,7 +250,7 @@ docker compose --profile vulkan up -d
 docker compose --profile cuda up -d
 
 # Pull the default LLM in the Ollama container
-docker compose exec ollama ollama pull llama3.2:3b
+docker compose exec ollama ollama pull qwen2.5:7b
 
 # Download speech & diarization models inside CallMind
 docker compose exec callmind ./callmind models download all
@@ -278,11 +283,15 @@ jobs:
 
 models:
   models_dir: "./models"
+  # Speech-to-text weights, relative to models_dir. Transcription is ~89% of
+  # processing time, so this is the setting worth experimenting with.
+  stt_multilingual: "stt/whisper-large-v3-turbo.bin"
+  stt_hebrew: "stt/ivrit-ai-large-v3-turbo.bin"
 
 llm:
   provider: "ollama" # "ollama", "openai", "anthropic", "heuristic"
   endpoint: "http://localhost:11434"
-  model: "llama3.2:3b"
+  model: "qwen2.5:7b" # smaller models degenerate on Hebrew; see callmind.yaml
 
 auth:
   enabled: false
@@ -302,10 +311,6 @@ bots:
     webhook_token: null # shared secret for the inbound webhook
     allowed_numbers: []
     result_timeout_secs: 600
-  slack:
-    enabled: false # config only; no handler implemented yet
-    bot_token: null
-    signing_secret: null
   watcher:
     enabled: false
     watch_dir: "./incoming"
@@ -313,6 +318,17 @@ bots:
   webhook:
     enabled: true
     secret_token: null
+
+# POST each finished call to an HTTP receiver. Disabled while url is empty --
+# this is the one setting that sends call content off the machine. Delivery is a
+# queued job, so a receiver that is down costs a retry with backoff rather than a
+# re-run of transcription. The payload carries the call id, title, summary,
+# action items, key facts, topics, language and duration; deliberately no phone
+# numbers.
+outbound_webhook:
+  url: "" # or set CALLMIND_OUTBOUND_WEBHOOK_URL
+  secret: "" # sent as X-CallMind-Secret; or set CALLMIND_OUTBOUND_WEBHOOK_SECRET
+  timeout_seconds: 30
 ```
 
 ---

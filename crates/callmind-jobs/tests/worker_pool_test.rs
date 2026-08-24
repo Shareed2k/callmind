@@ -25,7 +25,9 @@ impl JobHandler for MockIngestHandler {
 
 #[tokio::test]
 async fn test_worker_pool_executes_job_and_shuts_down() {
-    let pool = create_sqlite_pool(":memory:", 5).await.unwrap();
+    let pool = create_sqlite_pool(":memory:", 5, std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
     run_migrations(&pool).await.unwrap();
 
     let job_repo: Arc<dyn JobRepository> = Arc::new(SqlJobRepository::new(orm_connection(&pool)));
@@ -96,7 +98,9 @@ impl JobHandler for PanicOnceHandler {
 /// noticed and never restarted it, so capacity decayed silently.
 #[tokio::test]
 async fn test_handler_panic_does_not_kill_the_worker() {
-    let pool = create_sqlite_pool(":memory:", 5).await.unwrap();
+    let pool = create_sqlite_pool(":memory:", 5, std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
     run_migrations(&pool).await.unwrap();
 
     let job_repo: Arc<dyn JobRepository> = Arc::new(SqlJobRepository::new(orm_connection(&pool)));

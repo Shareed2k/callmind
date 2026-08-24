@@ -116,3 +116,50 @@ fn segmenter_recovers_the_labelled_speaker_count() {
         right.0, right.1, right.2, right.3
     );
 }
+
+/// The segmenter, used through the VAD trait that language identification
+/// consumes. Ignored by default: needs the re-exported model and real audio.
+#[tokio::test]
+#[ignore = "needs the re-exported model and labelled audio"]
+async fn the_vad_adapter_reports_the_segmenter_regions() {
+    use callmind_diarization::pyannote::PyannoteVad;
+    use callmind_vad::VadEngine;
+
+    let path = std::env::var("PYANNOTE_SEG_ONNX").unwrap_or_else(|_| {
+        [
+            "models/diarization/segmentation.onnx",
+            "../../models/diarization/segmentation.onnx",
+        ]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .unwrap_or("models/diarization/segmentation.onnx")
+        .to_string()
+    });
+    let Ok(segmenter) = PyannoteSegmenter::load(&path) else {
+        println!("model not available; skipping");
+        return;
+    };
+    let file = std::env::var("ONE_SPEAKER_FILES")
+        .ok()
+        .and_then(|f| f.split(',').next().map(str::to_string))
+        .expect("ONE_SPEAKER_FILES");
+
+    let audio = AudioDecoder::decode_file(&file).expect("decode");
+    let mono = AudioResampler::resample_to_16k_mono(&audio).expect("resample");
+
+    let direct = segmenter.analyse(&mono).expect("segmentation").speech;
+    let via_trait = PyannoteVad::new(std::sync::Arc::new(segmenter))
+        .detect(&mono)
+        .await
+        .expect("vad");
+
+    assert_eq!(
+        via_trait.len(),
+        direct.len(),
+        "the adapter must report exactly what the segmenter found"
+    );
+    assert!(!via_trait.is_empty(), "a monologue has speech in it");
+    for (a, b) in via_trait.iter().zip(&direct) {
+        assert_eq!((a.start_ms, a.end_ms), (b.start_ms, b.end_ms));
+    }
+}

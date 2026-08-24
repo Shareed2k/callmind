@@ -122,3 +122,30 @@ Return a structured JSON object with:
 pub fn build_analysis_prompt(transcript_text: &str, organization_name: &str) -> String {
     build_language_aware_analysis_prompt(transcript_text, organization_name, &Language::Hebrew)
 }
+
+/// Prompt for compressing one window of a long transcript.
+///
+/// Used when a call will not fit the model's context window: each window is
+/// summarised and the summaries take the transcript's place. The instruction is
+/// deliberately the same "only what was said" rule as the analysis prompt, since
+/// a fabrication introduced here would be laundered into the final analysis with
+/// nothing left to check it against.
+#[must_use]
+pub fn build_window_compression_prompt(window: &str, language: &Language) -> String {
+    let instruction = match language {
+        Language::Hebrew => {
+            "סכם את הקטע הבא מהשיחה בעברית, בקצרה. שמור שמות, מספרים, תאריכים, סכומים \
+             והחלטות בדיוק כפי שנאמרו. אל תוסיף דבר שלא נאמר."
+        }
+        Language::Russian => {
+            "Сожми следующий фрагмент разговора на русском языке, кратко. Сохрани \
+             имена, числа, даты, суммы и договорённости точно как сказано. Не добавляй ничего, \
+             чего не было."
+        }
+        _ => {
+            "Summarise the following passage of the call, briefly. Keep names, numbers, dates, \
+             amounts and decisions exactly as spoken. Add nothing that was not said."
+        }
+    };
+    format!("{instruction}\n\n---\n{window}\n---")
+}

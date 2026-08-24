@@ -66,11 +66,28 @@ pub struct DiarizationResult {
     pub speakers: usize,
     /// Chronological list of speaker turns.
     pub turns: Vec<SpeakerTurn>,
+    /// One voice print per speaker, when the engine produced embeddings.
+    ///
+    /// Carried out of diarization rather than recomputed later: the expensive
+    /// part -- an ONNX pass per window -- has already happened here, and these
+    /// used to be discarded the moment clustering finished.
+    pub speaker_embeddings: Vec<(SpeakerId, Vec<f32>)>,
 }
 
 impl DiarizationResult {
     pub fn new(speakers: usize, mut turns: Vec<SpeakerTurn>) -> Self {
         turns.sort_by_key(|t| t.start_ms);
-        Self { speakers, turns }
+        Self {
+            speakers,
+            turns,
+            speaker_embeddings: Vec::new(),
+        }
+    }
+
+    /// Attach the per-speaker voice prints.
+    #[must_use]
+    pub fn with_speaker_embeddings(mut self, embeddings: Vec<(SpeakerId, Vec<f32>)>) -> Self {
+        self.speaker_embeddings = embeddings;
+        self
     }
 }

@@ -61,8 +61,15 @@ pub struct ChannelMapping {
 /// Request DTO for creating a new Call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateCallRequest {
-    #[schema(example = "org-default")]
-    pub organization_id: Option<OrgId>,
+    // No `organization_id`. Authentication is a single shared API key, so there
+    // is no per-tenant principal to check one against -- honouring it from the
+    // body would let any authenticated caller place a call into somebody else's
+    // organization the moment a second one exists, and today it just fails the
+    // foreign key with a 500. Serde ignores unknown fields, so a client still
+    // sending it keeps working and the value is simply dropped.
+    //
+    // Multi-tenancy needs per-tenant credentials first; the organization should
+    // then come from the authenticated principal, never from the request.
     #[schema(example = "pbx-call-892147")]
     pub external_id: Option<String>,
     #[schema(example = "incoming")]

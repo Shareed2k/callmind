@@ -10,18 +10,19 @@ workspace = true
 
 [dependencies]
 callmind-core.workspace = true
+callmind-llm.workspace = true
+callmind-stt.workspace = true
 callmind-config.workspace = true
 callmind-db.workspace = true
 callmind-storage.workspace = true
 callmind-audio.workspace = true
 callmind-vad.workspace = true
 callmind-language.workspace = true
-callmind-stt.workspace = true
 callmind-diarization.workspace = true
 callmind-transcript.workspace = true
 callmind-analysis.workspace = true
 callmind-search.workspace = true
-callmind-llm.workspace = true
+callmind-ui.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 thiserror.workspace = true
@@ -32,5 +33,9 @@ serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 tempfile.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
+callmind-stt = { workspace = true, features = ["mock"] }
+callmind-llm = { workspace = true, features = ["mock"] }
+axum.workspace = true

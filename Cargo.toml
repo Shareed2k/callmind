@@ -17,6 +17,7 @@ members = [
     "crates/callmind-search",
     "crates/callmind-ui",
     "crates/callmind-worker-proto",
+    "crates/callmind-plugin-api",
     "crates/callmind-api",
     "crates/callmind",
 ]
@@ -86,6 +87,7 @@ callmind-llm = { path = "crates/callmind-llm" }
 callmind-analysis = { path = "crates/callmind-analysis" }
 callmind-search = { path = "crates/callmind-search" }
 callmind-ui = { path = "crates/callmind-ui" }
+callmind-plugin-api = { path = "crates/callmind-plugin-api" }
 callmind-api = { path = "crates/callmind-api" }
 callmind-worker-proto = { path = "crates/callmind-worker-proto" }
 

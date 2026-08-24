@@ -626,6 +626,7 @@ dependencies = [
  "callmind-jobs",
  "callmind-language",
  "callmind-llm",
+ "callmind-plugin-api",
  "callmind-search",
  "callmind-storage",
  "callmind-stt",
@@ -686,6 +687,7 @@ dependencies = [
  "callmind-llm",
  "callmind-search",
  "callmind-storage",
+ "callmind-stt",
  "callmind-transcript",
  "callmind-ui",
  "callmind-worker-proto",
@@ -804,6 +806,7 @@ name = "callmind-jobs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "callmind-analysis",
  "callmind-audio",
  "callmind-config",
@@ -816,8 +819,10 @@ dependencies = [
  "callmind-storage",
  "callmind-stt",
  "callmind-transcript",
+ "callmind-ui",
  "callmind-vad",
  "chrono",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -849,8 +854,10 @@ name = "callmind-llm"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "callmind-config",
  "callmind-core",
+ "callmind-llm",
  "reqwest",
  "serde",
  "serde_json",
@@ -858,6 +865,29 @@ dependencies = [
  "tokio",
  "tracing",
  "utoipa",
+]
+
+[[package]]
+name = "callmind-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "callmind-analysis",
+ "callmind-audio",
+ "callmind-core",
+ "callmind-db",
+ "callmind-diarization",
+ "callmind-jobs",
+ "callmind-language",
+ "callmind-llm",
+ "callmind-storage",
+ "callmind-stt",
+ "callmind-transcript",
+ "callmind-ui",
+ "callmind-vad",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -908,6 +938,7 @@ dependencies = [
  "callmind-audio",
  "callmind-core",
  "callmind-language",
+ "callmind-stt",
  "serde",
  "serde_json",
  "thiserror",
@@ -4813,7 +4844,7 @@ version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags",
  "bytes",
  "futures-util",
  "http",

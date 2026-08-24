@@ -17,7 +17,9 @@
 
 use super::support::{fts_matches, get, json_text, parse_ts};
 use crate::errors::DbError;
-use crate::traits::{AnalysisRow, CallListFilter, CallListRow, CallRepository};
+use crate::traits::{
+    AnalysisRow, CallListFilter, CallListRow, CallRepository, SpeakerRepository, StoredSpeaker,
+};
 use async_trait::async_trait;
 use callmind_core::{
     Call, CallDirection, CallFilter, CallId, OrgId, ProcessingStatus, Recording, RecordingId,
@@ -104,6 +106,16 @@ enum CallPluginResults {
     CallId,
     Plugin,
     PayloadJson,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum CallSpeakers {
+    Table,
+    CallId,
+    SpeakerId,
+    Embedding,
+    Name,
     CreatedAt,
 }
 
@@ -934,6 +946,157 @@ impl SqlCallRepository {
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
         Ok(res.rows_affected())
+    }
+}
+
+/// Voice prints as little-endian `f32` bytes.
+///
+/// SQLite has no array type, so a blob is what both backends can store with the
+/// same code. Round-tripping is exact: these are not lossy conversions.
+fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
+    embedding.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+fn embedding_from_bytes(bytes: &[u8]) -> Vec<f32> {
+    // `as_chunks` rather than `chunks_exact`, because the chunk size is a
+    // constant: it hands back `[u8; 4]` directly instead of a slice that has to
+    // be indexed four times. A trailing partial chunk is dropped either way.
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| f32::from_le_bytes(*word))
+        .collect()
+}
+
+#[async_trait]
+impl SpeakerRepository for SqlCallRepository {
+    async fn save_speaker_embedding(
+        &self,
+        call_id: CallId,
+        speaker_id: callmind_core::SpeakerId,
+        embedding: &[f32],
+    ) -> Result<(), DbError> {
+        let stmt = Query::insert()
+            .into_table(CallSpeakers::Table)
+            .columns([
+                CallSpeakers::CallId,
+                CallSpeakers::SpeakerId,
+                CallSpeakers::Embedding,
+                CallSpeakers::CreatedAt,
+            ])
+            .values([
+                call_id.to_string().into(),
+                i32::from(speaker_id.as_u16()).into(),
+                embedding_to_bytes(embedding).into(),
+                Utc::now().to_rfc3339().into(),
+            ])
+            .map_err(|e| DbError::Query(e.to_string()))?
+            // Reprocessing replaces the vector and leaves any name alone -- the
+            // name is a human decision and re-running the pipeline must not
+            // discard it.
+            .on_conflict(
+                OnConflict::columns([CallSpeakers::CallId, CallSpeakers::SpeakerId])
+                    .update_columns([CallSpeakers::Embedding, CallSpeakers::CreatedAt])
+                    .to_owned(),
+            )
+            .to_owned();
+        self.conn
+            .execute(&stmt)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn speakers_for_call(&self, call_id: CallId) -> Result<Vec<StoredSpeaker>, DbError> {
+        let stmt = Query::select()
+            .columns([
+                CallSpeakers::SpeakerId,
+                CallSpeakers::Embedding,
+                CallSpeakers::Name,
+            ])
+            .from(CallSpeakers::Table)
+            .and_where(Expr::col(CallSpeakers::CallId).eq(call_id.to_string()))
+            .order_by(CallSpeakers::SpeakerId, Order::Asc)
+            .to_owned();
+        let rows = self
+            .conn
+            .query_all(&stmt)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+
+        rows.iter()
+            .map(|row| {
+                let speaker: i32 = get(row, "speaker_id")?;
+                let bytes: Vec<u8> = get(row, "embedding")?;
+                Ok(StoredSpeaker {
+                    speaker_id: callmind_core::SpeakerId::new(speaker as u16),
+                    embedding: embedding_from_bytes(&bytes),
+                    name: get(row, "name")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn name_speaker(
+        &self,
+        call_id: CallId,
+        speaker_id: callmind_core::SpeakerId,
+        name: &str,
+    ) -> Result<(), DbError> {
+        let stmt = Query::update()
+            .table(CallSpeakers::Table)
+            .value(CallSpeakers::Name, name)
+            .and_where(Expr::col(CallSpeakers::CallId).eq(call_id.to_string()))
+            .and_where(Expr::col(CallSpeakers::SpeakerId).eq(i32::from(speaker_id.as_u16())))
+            .to_owned();
+        let res = self
+            .conn
+            .execute(&stmt)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        if res.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!(
+                "No stored voice for speaker {} of call {call_id}",
+                speaker_id.as_u16()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn list_named_speakers(&self, org_id: OrgId) -> Result<Vec<(String, Vec<f32>)>, DbError> {
+        // Joined to `calls` so exemplars stay inside their organization; a voice
+        // print must not leak across tenants.
+        let stmt = Query::select()
+            .expr_as(
+                Expr::col((CallSpeakers::Table, CallSpeakers::Name)),
+                Alias::new("name"),
+            )
+            .expr_as(
+                Expr::col((CallSpeakers::Table, CallSpeakers::Embedding)),
+                Alias::new("embedding"),
+            )
+            .from(CallSpeakers::Table)
+            .inner_join(
+                Calls::Table,
+                Expr::col((Calls::Table, Calls::Id))
+                    .equals((CallSpeakers::Table, CallSpeakers::CallId)),
+            )
+            .and_where(Expr::col((Calls::Table, Calls::OrganizationId)).eq(org_id.to_string()))
+            .and_where(Expr::col((CallSpeakers::Table, CallSpeakers::Name)).is_not_null())
+            .to_owned();
+
+        let rows = self
+            .conn
+            .query_all(&stmt)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        rows.iter()
+            .map(|row| {
+                let bytes: Vec<u8> = get(row, "embedding")?;
+                Ok((get(row, "name")?, embedding_from_bytes(&bytes)))
+            })
+            .collect()
     }
 }
 

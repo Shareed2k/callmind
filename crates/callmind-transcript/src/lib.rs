@@ -6,6 +6,7 @@
 
 pub mod builder;
 pub mod export;
+pub mod labels;
 pub mod models;
 pub mod normalizer;
 pub mod roles;

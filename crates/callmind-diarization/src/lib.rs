@@ -14,6 +14,7 @@ pub mod clustering;
 pub mod der;
 pub mod errors;
 pub mod features;
+pub mod identity;
 pub mod models;
 pub mod neural;
 pub mod onnx_extractor;

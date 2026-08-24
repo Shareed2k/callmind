@@ -14,6 +14,8 @@ use std::sync::Arc;
 pub struct AppState {
     pub config: Arc<AppConfig>,
     pub call_repo: Arc<dyn CallRepository>,
+    /// Voice prints, so naming a speaker here makes them recognisable later.
+    pub speaker_repo: Arc<dyn callmind_db::SpeakerRepository>,
     pub job_repo: Arc<dyn JobRepository>,
     pub stats_repo: Arc<dyn StatsRepository>,
     pub storage: Arc<dyn RecordingStorage>,
@@ -28,6 +30,7 @@ impl AppState {
     pub fn new(
         config: Arc<AppConfig>,
         call_repo: Arc<dyn CallRepository>,
+        speaker_repo: Arc<dyn callmind_db::SpeakerRepository>,
         job_repo: Arc<dyn JobRepository>,
         stats_repo: Arc<dyn StatsRepository>,
         storage: Arc<dyn RecordingStorage>,
@@ -39,6 +42,7 @@ impl AppState {
         Self {
             config,
             call_repo,
+            speaker_repo,
             job_repo,
             stats_repo,
             storage,

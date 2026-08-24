@@ -21,7 +21,9 @@ async fn setup_test_app() -> (axum::Router, tempfile::TempDir) {
 }
 
 async fn setup_test_app_with_config(config: AppConfig) -> (axum::Router, tempfile::TempDir) {
-    let pool = create_sqlite_pool(":memory:", 5).await.unwrap();
+    let pool = create_sqlite_pool(":memory:", 5, std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
     run_migrations(&pool).await.unwrap();
 
     let temp_dir = tempdir().unwrap();
@@ -42,6 +44,7 @@ async fn setup_test_app_with_config(config: AppConfig) -> (axum::Router, tempfil
 
     let state = AppState::new(
         config,
+        call_repo.clone(),
         call_repo,
         job_repo,
         stats_repo,
@@ -81,7 +84,6 @@ async fn test_call_lifecycle_and_recording_upload_stream() {
 
     // 1. Create Call
     let create_req = CreateCallRequest {
-        organization_id: None,
         external_id: Some("pbx-1001".to_string()),
         direction: None,
         phone_from: Some("+972501112233".to_string()),
@@ -325,4 +327,58 @@ async fn test_auth_covers_ui_and_api_routes() {
             auth.1
         );
     }
+}
+
+/// The organization a call belongs to must not be selectable by the caller.
+///
+/// Authentication is a single shared API key -- there is no per-tenant principal
+/// to check an organization against -- so honouring `organization_id` from the
+/// body would let any authenticated caller place a call into, or read it out of,
+/// somebody else's organization the moment a second one exists. That is an IDOR
+/// primitive waiting for a tenant.
+#[tokio::test]
+async fn a_caller_cannot_choose_the_organization_a_call_belongs_to() {
+    let (app, _tmp) = setup_test_app().await;
+
+    let foreign = uuid::Uuid::new_v4();
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/v1/calls")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "organization_id": foreign.to_string(),
+                        "direction": "incoming",
+                        "external_id": "org-scoping-probe"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("request completes");
+
+    assert!(
+        response.status().is_success(),
+        "the call is still created: {}",
+        response.status()
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let created: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+    assert_ne!(
+        created["organization_id"].as_str(),
+        Some(foreign.to_string().as_str()),
+        "the requested organization must be ignored, not honoured"
+    );
+    assert_eq!(
+        created["organization_id"].as_str(),
+        Some(callmind_core::OrgId::DEFAULT.to_string().as_str()),
+        "the call belongs to the server's own organization"
+    );
 }

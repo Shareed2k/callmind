@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use callmind_api::{AppState, create_router};
 use callmind_config::AppConfig;
@@ -113,13 +113,15 @@ async fn main() -> Result<()> {
 }
 
 async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
-    init_tracing();
+    // The format comes from the config, so the subscriber is installed after it
+    // is loaded rather than before.
     info!("Starting CallMind Server v{}", env!("CARGO_PKG_VERSION"));
 
     let config = Arc::new(
         AppConfig::load_from_file_or_default(config_path)
             .context("Failed to load configuration")?,
     );
+    init_tracing_with(config.logging.format);
 
     // One connection for whichever backend the config names. Every repository
     // builds its SQL with sea-query, so nothing below this line knows or cares.
@@ -127,6 +129,7 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         &config.database.driver,
         &config.database.url,
         config.database.max_connections,
+        Duration::from_millis(config.database.busy_timeout_ms),
     )
     .await
     .context("Failed to connect to the database")?;
@@ -152,25 +155,72 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
             ),
         };
 
-    // Initialize AI and Processing Subsystems
-    let vad = Arc::new(callmind_vad::EnergyVadEngine::default());
-
-    let hebrew_model_path = config
+    // Initialize AI and Processing Subsystems.
+    //
+    // Speaker segmentation, when its model is present, is both a better speech
+    // detector and the source of the speaker count. Loaded once and shared: the
+    // diarizer uses it for both, and language identification -- which probes a
+    // few windows of speech to choose a Whisper model -- gets regions that are
+    // actually speech rather than possibly hold music. Speech-to-text is given
+    // the whole recording either way.
+    let segmentation_model = config
         .models
         .models_dir
-        .join("stt/ivrit-ai-large-v3-turbo.bin");
-    let multi_model_path = config.models.models_dir.join("stt/whisper-large-v3.bin");
+        .join("diarization/segmentation.onnx");
+    let segmenter = if segmentation_model.exists() {
+        match callmind_diarization::pyannote::PyannoteSegmenter::load(&segmentation_model) {
+            Ok(loaded) => {
+                info!(
+                    "Loaded pyannote speaker segmentation from {}; speech detection and the \
+                     speaker count are measured rather than assumed",
+                    segmentation_model.display()
+                );
+                Some(Arc::new(loaded))
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load speaker segmentation from {}: {e}. Falling back to the \
+                     energy detector and the two-party prior.",
+                    segmentation_model.display()
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
+    let vad: Arc<dyn callmind_vad::VadEngine> = match segmenter.clone() {
+        Some(seg) => Arc::new(callmind_diarization::pyannote::PyannoteVad::new(seg)),
+        None => Arc::new(callmind_vad::EnergyVadEngine::default()),
+    };
+
+    // From config, not compiled in: speech-to-text dominates processing time and
+    // the model is the lever on it.
+    let hebrew_model_path = config.models.models_dir.join(&config.models.stt_hebrew);
+    let multi_model_path = config
+        .models
+        .models_dir
+        .join(&config.models.stt_multilingual);
+
+    ensure_model_present("hebrew speech-to-text", &hebrew_model_path)?;
+    ensure_model_present("multilingual speech-to-text", &multi_model_path)?;
+
+    let hebrew_label = model_label(&hebrew_model_path);
+    let multi_label = model_label(&multi_model_path);
     let hebrew_stt = Arc::new(callmind_stt::WhisperCppEngine::new(
         hebrew_model_path,
-        "ivrit-ai-turbo",
+        &hebrew_label,
         "1.0",
     ));
     let multi_stt = Arc::new(callmind_stt::WhisperCppEngine::new(
         multi_model_path,
-        "whisper-large-v3",
+        &multi_label,
         "1.0",
     ));
+    // Kept so shutdown can release the GPU weights; see `release_stt_weights`.
+    let stt_engines = vec![hebrew_stt.clone(), multi_stt.clone()];
+
     let stt_router = Arc::new(callmind_stt::SttRouter::new(
         hebrew_stt,
         multi_stt.clone(),
@@ -214,31 +264,11 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         vad.clone(),
     );
 
-    // Speaker segmentation, if the model has been exported. It is what lets the
-    // speaker count come from the audio instead of a two-party assumption --
-    // measured on labelled recordings at 4/4 monologues and 23/24 two-party
-    // calls, against 0/4 and 24/24 for the assumption. Absent, everything works
-    // as before. See scripts/export_pyannote_segmentation.py.
-    let segmentation_model = config
-        .models
-        .models_dir
-        .join("diarization/segmentation.onnx");
-    if segmentation_model.exists() {
-        match callmind_diarization::pyannote::PyannoteSegmenter::load(&segmentation_model) {
-            Ok(segmenter) => {
-                info!(
-                    "Loaded pyannote speaker segmentation from {}; the speaker count \
-                     will be measured rather than assumed",
-                    segmentation_model.display()
-                );
-                neural_diarizer = neural_diarizer.with_segmenter(Arc::new(segmenter));
-            }
-            Err(e) => warn!(
-                "Failed to load speaker segmentation from {}: {e}. Falling back to the \
-                 two-party prior.",
-                segmentation_model.display()
-            ),
-        }
+    // Measured on labelled recordings: with segmentation the speaker count comes
+    // out 4/4 on monologues and 23/24 on two-party calls, against 0/4 and 24/24
+    // for the two-party assumption it replaces.
+    if let Some(seg) = segmenter {
+        neural_diarizer = neural_diarizer.with_segmenter(seg);
     }
     let clustering_diarizer = Arc::new(neural_diarizer);
 
@@ -259,11 +289,32 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         (*search_engine).clone(),
         llm_engine.clone(),
     ));
-    let analysis_engine = Arc::new(callmind_analysis::AnalysisEngine::new(llm_engine));
+    // The analyser needs the same budget the model was given, or it cannot know
+    // when a transcript will be cut.
+    let analysis_engine = Arc::new(
+        callmind_analysis::AnalysisEngine::new(llm_engine)
+            .with_context_tokens(config.llm.context_tokens),
+    );
 
     // Initialize Complete End-to-End Pipeline Handler
+    // Plugins wire themselves in. The list is the only place a plugin is named:
+    // closed-source ones are added here behind a Cargo feature, which is the
+    // right linkage model given Rust has no stable ABI. Nothing below knows how
+    // many there are.
+    let plugins: Vec<Arc<dyn callmind_plugin_api::Plugin>> = Vec::new();
+
+    // Nothing leaves the machine unless a receiver is configured, so the pipeline
+    // is handed a queue only in that case.
+    let webhook_receiver = config.outbound_webhook.url.clone();
+    let webhook_queue: Option<Arc<dyn callmind_db::JobRepository>> = webhook_receiver
+        .as_ref()
+        .map(|_| job_repo.clone() as Arc<dyn callmind_db::JobRepository>);
+
     let pipeline_handler = CallPipelineHandler {
         call_repo: call_repo.clone(),
+        speaker_repo: call_repo.clone(),
+        webhook_queue,
+        plugins: plugins.clone(),
         storage: storage.clone(),
         transcriber,
         analyzer: analysis_engine.clone(),
@@ -272,9 +323,36 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
 
     // Initialize Job Registry & Worker Pool
     let cancellation_token = CancellationToken::new();
-    let registry = JobRegistry::builder()
-        .register(JobKind::IngestRecording, pipeline_handler)
-        .build();
+    let mut registry_builder =
+        JobRegistry::builder().register(JobKind::IngestRecording, pipeline_handler);
+
+    if let Some(url) = webhook_receiver {
+        info!(
+            "Outbound webhook enabled; finished calls will be delivered (secret {})",
+            if config.outbound_webhook.secret.is_some() {
+                "set"
+            } else {
+                "not set"
+            }
+        );
+        registry_builder = registry_builder.register(
+            JobKind::DeliverWebhook,
+            callmind_jobs::WebhookDeliveryHandler::new(
+                url,
+                config.outbound_webhook.secret.clone(),
+                Duration::from_secs(config.outbound_webhook.timeout_seconds),
+            ),
+        );
+    }
+    for plugin in &plugins {
+        info!(
+            "Loading plugin '{}' (job kind {})",
+            plugin.name(),
+            plugin.job_kind().as_str()
+        );
+        registry_builder = plugin.register_jobs(registry_builder);
+    }
+    let registry = registry_builder.build();
 
     let mut worker_pool = WorkerPool::new(
         job_repo.clone(),
@@ -314,10 +392,22 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     // Initialize REST API State and Router
     // Runtime HTML templates. A plugin registers its own view here at startup;
     // built-in views are compiled in but still rendered at runtime.
-    let templates = Arc::new(callmind_ui::templates::TemplateRegistry::new());
+    let mut template_registry = callmind_ui::templates::TemplateRegistry::new();
+    for plugin in &plugins {
+        // A plugin with no view is the common case, so a failure here is the
+        // plugin's problem and not a reason to refuse to start.
+        if let Err(e) = plugin.register_ui(&mut template_registry) {
+            warn!(
+                "Plugin '{}' failed to register its view: {e}",
+                plugin.name()
+            );
+        }
+    }
+    let templates = Arc::new(template_registry);
 
     let app_state = AppState::new(
         config.clone(),
+        call_repo.clone(),
         call_repo.clone(),
         job_repo.clone(),
         stats_repo,
@@ -397,11 +487,18 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     cancellation_token.cancel();
     server_handle.abort();
 
-    // Deliberately shorter than any sane container stop grace period. Workers
-    // blocked inside `spawn_blocking` (STT, diarization) cannot be cancelled, so
-    // waiting longer does not help them finish — it only risks SIGKILL arriving
-    // before the requeue below runs, which is what happened against Docker's
-    // 10s default.
+    // Transcription is the one blocking stage that can be told to stop: whisper
+    // polls this between decoder steps. Without it a call in flight ran to
+    // completion while shutdown gave up waiting, and the process aborted on the
+    // Metal backend's exit assert instead of stopping.
+    for engine in &stt_engines {
+        engine.request_abort();
+    }
+
+    // Deliberately shorter than any sane container stop grace period. Diarization
+    // still cannot be cancelled inside `spawn_blocking`, so waiting longer does
+    // not help it finish — it only risks SIGKILL arriving before the requeue
+    // below runs, which is what happened against Docker's 10s default.
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
     if tokio::time::timeout(SHUTDOWN_TIMEOUT, worker_pool.wait())
         .await
@@ -427,9 +524,13 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
             Err(err) => error!("Failed to reset interrupted calls: {err}"),
         }
 
+        release_stt_weights(&stt_engines);
+
         info!("Forcing process exit after returning interrupted work to the queue.");
         std::process::exit(0);
     }
+
+    release_stt_weights(&stt_engines);
 
     info!("CallMind Server stopped cleanly.");
 
@@ -441,7 +542,13 @@ async fn run_migrate(config_path: Option<PathBuf>) -> Result<()> {
     info!("Running CallMind database migrations...");
 
     let config = AppConfig::load_from_file_or_default(config_path)?;
-    let db = connect(&config.database.driver, &config.database.url, 2).await?;
+    let db = connect(
+        &config.database.driver,
+        &config.database.url,
+        2,
+        Duration::from_millis(config.database.busy_timeout_ms),
+    )
+    .await?;
     run_migrations_on(&db).await?;
 
     println!("All database migrations applied successfully.");
@@ -463,7 +570,14 @@ async fn run_doctor(config_path: Option<PathBuf>) -> Result<()> {
     };
 
     // Check Database
-    match connect(&config.database.driver, &config.database.url, 2).await {
+    match connect(
+        &config.database.driver,
+        &config.database.url,
+        2,
+        Duration::from_millis(config.database.busy_timeout_ms),
+    )
+    .await
+    {
         Ok(db) => {
             println!(
                 "[✓] {} database connected ({})",
@@ -519,7 +633,13 @@ async fn run_import(
     println!("Scanning directory: {:?}", import_path);
 
     let config = AppConfig::load_from_file_or_default(config_path)?;
-    let db = connect(&config.database.driver, &config.database.url, 4).await?;
+    let db = connect(
+        &config.database.driver,
+        &config.database.url,
+        4,
+        Duration::from_millis(config.database.busy_timeout_ms),
+    )
+    .await?;
     run_migrations_on(&db).await?;
 
     let call_repo = Arc::new(SqlCallRepository::new(db.clone()));
@@ -838,7 +958,13 @@ async fn run_backfill(config_path: Option<PathBuf>) -> Result<()> {
     println!("=== CallMind Metadata Backfill ===");
 
     let config = AppConfig::load_from_file_or_default(config_path)?;
-    let db = connect(&config.database.driver, &config.database.url, 4).await?;
+    let db = connect(
+        &config.database.driver,
+        &config.database.url,
+        4,
+        Duration::from_millis(config.database.busy_timeout_ms),
+    )
+    .await?;
     run_migrations_on(&db).await?;
     let call_repo = SqlCallRepository::new(db);
     let storage: Arc<dyn callmind_storage::RecordingStorage> =
@@ -908,7 +1034,13 @@ async fn run_reprocess(config_path: Option<PathBuf>, call_id_str: String) -> Res
     println!("Target Call ID: {}", call_id);
 
     let config = AppConfig::load_from_file_or_default(config_path)?;
-    let db = connect(&config.database.driver, &config.database.url, 4).await?;
+    let db = connect(
+        &config.database.driver,
+        &config.database.url,
+        4,
+        Duration::from_millis(config.database.busy_timeout_ms),
+    )
+    .await?;
     run_migrations_on(&db).await?;
 
     let call_repo = Arc::new(SqlCallRepository::new(db.clone()));
@@ -945,11 +1077,105 @@ fn run_version() -> Result<()> {
 }
 
 fn init_tracing() {
+    init_tracing_with(callmind_config::LogFormat::default());
+}
+
+/// Install the log subscriber in the requested format.
+///
+/// JSON is what lets a log aggregator group by stage and call rather than
+/// leaving a human to grep prose. The `json` feature was already a declared
+/// dependency and simply unused.
+fn init_tracing_with(format: callmind_config::LogFormat) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,callmind=debug,tower_http=debug"));
 
-    let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer())
-        .try_init();
+    let registry = tracing_subscriber::registry().with(filter);
+    let _ = match format {
+        callmind_config::LogFormat::Text => registry
+            .with(tracing_subscriber::fmt::layer().boxed())
+            .try_init(),
+        callmind_config::LogFormat::Json => registry
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_current_span(true)
+                    .boxed(),
+            )
+            .try_init(),
+    };
+}
+
+/// Drop the loaded Whisper weights before the process goes away.
+///
+/// The Metal backend asserts at exit if its resources are still alive, and the
+/// shutdown path calls `std::process::exit`, which runs no destructors: killing
+/// the server mid-inference aborted with
+/// `GGML_ASSERT([rsets->data count] == 0)` and exit code 134.
+fn release_stt_weights(engines: &[Arc<callmind_stt::WhisperCppEngine>]) {
+    for engine in engines {
+        if engine.unload() {
+            info!("Released Whisper weights held by the speech-to-text engine");
+        }
+    }
+}
+
+/// A missing weights file otherwise surfaces as a failed job on the first call,
+/// long after startup, so refuse to start and name the command that fixes it.
+fn ensure_model_present(kind: &str, path: &std::path::Path) -> Result<()> {
+    anyhow::ensure!(
+        path.exists(),
+        "{kind} model not found at {}. Fetch it with `callmind models download <id>` \
+         (`callmind models list` shows the ids), or point `models.stt_*` in the config \
+         at a file you already have.",
+        path.display()
+    );
+    Ok(())
+}
+
+/// The label is stored with every transcript, so it follows the configured file
+/// instead of guessing which model is loaded.
+fn model_label(path: &std::path::Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+#[cfg(test)]
+mod stt_model_startup_tests {
+    use super::*;
+
+    /// A missing weights file otherwise surfaces as a failed job on the first
+    /// call, long after startup -- and switching the default multilingual model
+    /// to turbo makes that likely for anyone who downloaded the old default.
+    #[test]
+    fn a_missing_model_is_refused_at_startup_with_the_command_that_fixes_it() {
+        let err = ensure_model_present("multilingual", &PathBuf::from("/nope/turbo.bin"))
+            .expect_err("a missing model must not be accepted");
+        let msg = err.to_string();
+        assert!(msg.contains("/nope/turbo.bin"), "names the file: {msg}");
+        assert!(msg.contains("models download"), "names the fix: {msg}");
+    }
+
+    #[test]
+    fn a_present_model_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("turbo.bin");
+        std::fs::write(&path, b"weights").expect("write");
+        ensure_model_present("multilingual", &path).expect("a present model is fine");
+    }
+
+    /// The label is stored with every transcript, so it has to follow the
+    /// configured file rather than a compiled-in guess at which model is loaded.
+    #[test]
+    fn the_engine_label_follows_the_configured_filename() {
+        assert_eq!(
+            model_label(&PathBuf::from("models/stt/whisper-large-v3-turbo.bin")),
+            "whisper-large-v3-turbo"
+        );
+        assert_eq!(
+            model_label(&PathBuf::from("models/stt/whisper-large-v3.bin")),
+            "whisper-large-v3"
+        );
+    }
 }

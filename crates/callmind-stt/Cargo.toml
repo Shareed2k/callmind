@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [features]
+mock = []
 default = []
 metal = ["whisper-rs/metal"]
 cuda = ["whisper-rs/cuda"]
@@ -27,3 +28,6 @@ serde_json.workspace = true
 utoipa.workspace = true
 tokio.workspace = true
 whisper-rs.workspace = true
+
+[dev-dependencies]
+callmind-stt = { path = ".", features = ["mock"] }

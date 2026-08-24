@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 callmind-core.workspace = true
+callmind-llm.workspace = true
+callmind-stt.workspace = true
 callmind-config.workspace = true
 callmind-audio.workspace = true
 callmind-db.workspace = true
@@ -21,7 +23,6 @@ tonic.workspace = true
 callmind-analysis.workspace = true
 callmind-search.workspace = true
 callmind-ui.workspace = true
-callmind-llm.workspace = true
 
 axum.workspace = true
 tower.workspace = true
@@ -49,4 +50,6 @@ base64 = "0.22"
 subtle = "2.6"
 
 [dev-dependencies]
+callmind-stt = { workspace = true, features = ["mock"] }
+callmind-llm = { workspace = true, features = ["mock"] }
 tokio-stream.workspace = true

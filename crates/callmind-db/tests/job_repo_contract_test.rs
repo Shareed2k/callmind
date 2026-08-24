@@ -67,11 +67,11 @@ async fn kind_filtering_and_retries_match() {
     for (name, conn) in backend::all("t_job_kinds").await {
         let repo = SqlJobRepository::new(conn);
         let ingest = repo.enqueue(&job(JobKind::IngestRecording)).await.unwrap();
-        let emotions = repo.enqueue(&job(JobKind::AnalyzeEmotions)).await.unwrap();
+        let emotions = repo.enqueue(&job(JobKind::DeliverWebhook)).await.unwrap();
 
         // A worker only receives kinds it asked for.
         let leased = repo
-            .fetch_and_lock("w", &[JobKind::AnalyzeEmotions])
+            .fetch_and_lock("w", &[JobKind::DeliverWebhook])
             .await
             .unwrap()
             .expect("emotion job");
@@ -89,7 +89,7 @@ async fn kind_filtering_and_retries_match() {
         );
         // Not due yet, so it must not be leasable.
         assert!(
-            repo.fetch_and_lock("w", &[JobKind::AnalyzeEmotions])
+            repo.fetch_and_lock("w", &[JobKind::DeliverWebhook])
                 .await
                 .unwrap()
                 .is_none(),

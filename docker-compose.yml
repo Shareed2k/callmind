@@ -3,7 +3,7 @@ services:
   # 1. CallMind (Default Universal CPU)
   # ----------------------------------------------------------------------------
   callmind:
-    image: ghcr.io/callmind/callmind:latest
+    image: ghcr.io/shareed2k/callmind:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -26,7 +26,7 @@ services:
       - CALLMIND_SERVER_BIND=0.0.0.0:8080
       - CALLMIND_LLM_ENDPOINT=http://ollama:11434
       - CALLMIND_LLM_PROVIDER=ollama
-      - CALLMIND_LLM_MODEL=llama3.2:3b
+      - CALLMIND_LLM_MODEL=qwen2.5:7b
     depends_on:
       - ollama
     networks:
@@ -37,7 +37,7 @@ services:
   # Run via: docker compose --profile vulkan up -d
   # ----------------------------------------------------------------------------
   callmind-vulkan:
-    image: ghcr.io/callmind/callmind:vulkan
+    image: ghcr.io/shareed2k/callmind:vulkan
     build:
       context: .
       dockerfile: Dockerfile
@@ -63,7 +63,7 @@ services:
       - CALLMIND_SERVER_BIND=0.0.0.0:8080
       - CALLMIND_LLM_ENDPOINT=http://ollama:11434
       - CALLMIND_LLM_PROVIDER=ollama
-      - CALLMIND_LLM_MODEL=llama3.2:3b
+      - CALLMIND_LLM_MODEL=qwen2.5:7b
     depends_on:
       - ollama
     networks:
@@ -74,7 +74,7 @@ services:
   # Run via: docker compose --profile cuda up -d
   # ----------------------------------------------------------------------------
   callmind-cuda:
-    image: ghcr.io/callmind/callmind:cuda
+    image: ghcr.io/shareed2k/callmind:cuda
     build:
       context: .
       dockerfile: Dockerfile.cuda
@@ -96,7 +96,7 @@ services:
       - CALLMIND_SERVER_BIND=0.0.0.0:8080
       - CALLMIND_LLM_ENDPOINT=http://ollama:11434
       - CALLMIND_LLM_PROVIDER=ollama
-      - CALLMIND_LLM_MODEL=llama3.2:3b
+      - CALLMIND_LLM_MODEL=qwen2.5:7b
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     deploy:

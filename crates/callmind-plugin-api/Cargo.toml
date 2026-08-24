@@ -1,0 +1,31 @@
+[package]
+name = "callmind-plugin-api"
+description = "Stable surface a CallMind plugin depends on: engine traits, the job registry, and the UI template registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+callmind-core.workspace = true
+callmind-audio.workspace = true
+callmind-vad.workspace = true
+callmind-stt.workspace = true
+callmind-llm.workspace = true
+callmind-language.workspace = true
+callmind-diarization.workspace = true
+callmind-transcript.workspace = true
+callmind-analysis.workspace = true
+callmind-storage.workspace = true
+callmind-db.workspace = true
+callmind-jobs.workspace = true
+callmind-ui.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
