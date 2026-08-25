@@ -6,6 +6,8 @@
 //! accepts exactly those clients and no others.
 
 use callmind_config::{AllowedWorker, WorkerTlsConfig};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 
@@ -18,6 +20,8 @@ pub enum TlsSetupError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{path} holds no certificate")]
+    NoCertificate { path: PathBuf },
     #[error("no workers are pinned, so nobody could connect")]
     NoWorkersPinned,
 }
@@ -46,6 +50,43 @@ pub fn server_tls_config(
     Ok(ServerTlsConfig::new()
         .identity(Identity::from_pem(cert, key))
         .client_ca_root(Certificate::from_pem(roots)))
+}
+
+/// Map each pinned certificate's fingerprint to the worker's name.
+///
+/// The name in the configuration is not on the wire — a handshake only ever
+/// yields the certificate — so this is what turns an accepted connection back
+/// into an identity the lease can be recorded against.
+pub fn pinned_worker_names(
+    allowed: &[AllowedWorker],
+) -> Result<HashMap<String, String>, TlsSetupError> {
+    allowed
+        .iter()
+        .map(|worker| {
+            let pem = read(&worker.certificate)?;
+            // The first certificate only: a worker presents its leaf, and
+            // anything else in the file would be a chain we do not pin.
+            let der = rustls_pemfile::certs(&mut pem.as_slice())
+                .next()
+                .transpose()
+                .map_err(|source| TlsSetupError::Read {
+                    path: worker.certificate.clone(),
+                    source,
+                })?
+                .ok_or_else(|| TlsSetupError::NoCertificate {
+                    path: worker.certificate.clone(),
+                })?;
+            Ok((fingerprint(&der), worker.name.clone()))
+        })
+        .collect()
+}
+
+/// SHA-256 of a DER certificate, hex-encoded.
+///
+/// Over the whole certificate rather than the subject, so a caller cannot take
+/// another worker's name by issuing itself a certificate that claims it.
+pub fn fingerprint(der: &[u8]) -> String {
+    hex::encode(Sha256::digest(der))
 }
 
 fn read(path: &PathBuf) -> Result<Vec<u8>, TlsSetupError> {

@@ -405,6 +405,24 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     }
     let templates = Arc::new(template_registry);
 
+    // Remote worker gRPC listener, on its own port. The contract lives in
+    // callmind-worker-proto; workers never touch the database.
+    config
+        .workers
+        .validate()
+        .map_err(|reason| anyhow::anyhow!("Invalid workers configuration: {reason}"))?;
+
+    // A handshake yields a certificate, never the name beside it in the
+    // configuration, so the listener needs this to turn one into the other.
+    // Read at startup so a missing or malformed file stops the process rather
+    // than locking every worker out at its first call.
+    let worker_names = if config.workers.enabled && config.workers.tls.is_some() {
+        callmind_api::grpc_tls::pinned_worker_names(&config.workers.allowed)
+            .context("Failed to read the pinned worker certificates")?
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let app_state = AppState::new(
         config.clone(),
         call_repo.clone(),
@@ -416,13 +434,8 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         ask_engine,
         analysis_engine,
         templates,
-    );
-    // Remote worker gRPC listener, on its own port. The contract lives in
-    // callmind-worker-proto; workers never touch the database.
-    config
-        .workers
-        .validate()
-        .map_err(|reason| anyhow::anyhow!("Invalid workers configuration: {reason}"))?;
+    )
+    .with_worker_names(worker_names);
 
     if config.workers.enabled {
         let grpc_addr: std::net::SocketAddr = config

@@ -66,14 +66,13 @@ fn a_missing_certificate_file_is_reported_with_its_path() {
 /// Pins two workers instead of one and checks that `server_tls_config` still
 /// succeeds: it reads both PEM files and concatenates them without error.
 ///
-/// This does NOT prove rustls accepts a multi-certificate PEM bundle as trust
-/// roots, and it does NOT prove a handshake would succeed for either worker.
-/// `Certificate::from_pem` and `Identity::from_pem` just wrap raw bytes —
-/// tonic only parses PEM and builds rustls' `RootCertStore` inside
-/// `ServerTlsConfig::tls_acceptor()`, called from `Server::tls_config()`,
-/// which no test in this file reaches. Settling whether the bundle is
-/// actually accepted needs a live client/server handshake test, which
-/// belongs with the serve-and-connect scaffolding added later.
+/// On its own this proves nothing about rustls: `Certificate::from_pem` and
+/// `Identity::from_pem` just wrap raw bytes, and tonic only parses the PEM into
+/// a `RootCertStore` inside `Server::tls_config()`, which this test never
+/// reaches. That the bundle is genuinely accepted -- every worker in it, not
+/// just the first -- is settled over a real socket by
+/// `every_worker_in_the_pinned_bundle_can_connect_and_is_told_apart` in
+/// `worker_grpc_test.rs`.
 #[test]
 fn two_pinned_workers_are_read_and_concatenated_without_error() {
     let dir = tempfile::tempdir().expect("tempdir");

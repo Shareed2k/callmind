@@ -20,6 +20,7 @@ callmind-jobs.workspace = true
 callmind-transcript.workspace = true
 callmind-worker-proto.workspace = true
 tonic.workspace = true
+rustls-pemfile.workspace = true
 callmind-analysis.workspace = true
 callmind-search.workspace = true
 callmind-ui.workspace = true

@@ -136,5 +136,9 @@ whatlang = "0.18"
 minijinja = { version = "2.24", features = ["loader"] }
 prost = "0.14"
 tonic = { version = "0.14", features = ["tls-ring"] }
+# Reads a PEM file into DER certificates. From the rustls project, which tonic
+# already pulls in; hand-rolling base64 framing for a security boundary is not
+# a saving.
+rustls-pemfile = "2"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
