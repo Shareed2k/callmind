@@ -408,12 +408,9 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     let templates = Arc::new(template_registry);
 
     // Remote worker gRPC listener, on its own port. The contract lives in
-    // callmind-worker-proto; workers never touch the database.
-    config
-        .workers
-        .validate()
-        .map_err(|reason| anyhow::anyhow!("Invalid workers configuration: {reason}"))?;
-
+    // callmind-worker-proto; workers never touch the database. The section was
+    // validated with the rest of the configuration, before anything started.
+    //
     // A handshake yields a certificate, never the name beside it in the
     // configuration, so the listener needs this to turn one into the other.
     // Read at startup so a missing or malformed file stops the process rather

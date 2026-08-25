@@ -118,7 +118,9 @@ workers:
   # allowed:
   #   - name: "gpu-1"
   #     certificate: "/etc/callmind/gpu-1.pem"
-  # Dispatched after every transcript, one job per kind.
+  # Dispatched after every transcript, one job per kind. Named bare here, but a
+  # worker leases the kind as "plugin:<name>": "acoustic-emotions" here is
+  # "plugin:acoustic-emotions" on the wire. ASCII letters, digits, - and _ only.
   plugin_kinds: []
 
 # POST each finished call to an HTTP receiver (n8n, a Shortcut, anything that

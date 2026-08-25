@@ -245,6 +245,10 @@ impl AppConfig {
                 self.llm.provider, SUPPORTED_LLM_PROVIDERS
             )));
         }
+        // Here rather than at the call site that starts the listener: a refused
+        // worker configuration must be impossible, not merely fatal once the
+        // pool is already transcribing and holding jobs `Running`.
+        self.workers.validate().map_err(ConfigError::Validation)?;
         Ok(())
     }
 }
@@ -439,8 +443,51 @@ impl WorkersConfig {
     /// Returns the reason rather than logging it: the caller fails startup with
     /// it, the way a missing model file already does.
     pub fn validate(&self) -> Result<(), String> {
+        // Ahead of the `enabled` check, because these are dispatched by the
+        // pipeline whether or not anything is listening for them. Each travels
+        // as the job kind `plugin:<name>` and is submitted back under the same
+        // name: an empty or exotic name makes a job nothing can parse -- which
+        // breaks the whole call's job list -- and a result the listener refuses.
+        for kind in &self.plugin_kinds {
+            if kind.is_empty()
+                || !kind
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(format!(
+                    "workers.plugin_kinds entry {kind:?} is not a usable plugin name; \
+                     use ASCII letters, digits, '-' and '_'."
+                ));
+            }
+        }
+
         if !self.enabled {
             return Ok(());
+        }
+
+        // Checked before the bind address: TLS with nobody pinned accepts no
+        // one on loopback just as much as anywhere else, and only surfaces at
+        // the first connection otherwise.
+        if self.tls.is_some() && self.allowed.is_empty() {
+            return Err(
+                "workers.tls is set but workers.allowed is empty, so no worker could connect. \
+                 Pin each worker to its certificate."
+                    .to_string(),
+            );
+        }
+
+        // Workers are keyed by their certificate's fingerprint, so two entries
+        // sharing a certificate collapse into one and the other name is
+        // silently dead.
+        let mut seen = std::collections::HashSet::new();
+        for worker in &self.allowed {
+            if !seen.insert(&worker.certificate) {
+                return Err(format!(
+                    "workers.allowed pins {} more than once. A certificate identifies exactly one \
+                     worker, so only the last name using it would ever be handed out.",
+                    worker.certificate.display()
+                ));
+            }
         }
 
         let is_loopback = self
@@ -459,14 +506,6 @@ impl WorkersConfig {
                  A worker leases jobs and downloads recordings, so the listener must require a client certificate.",
                 self.bind
             ));
-        }
-
-        if self.allowed.is_empty() {
-            return Err(
-                "workers.tls is set but workers.allowed is empty, so no worker could connect. \
-                 Pin each worker to its certificate."
-                    .to_string(),
-            );
         }
 
         Ok(())
@@ -1112,15 +1151,85 @@ mod worker_tls_config_tests {
     }
 
     /// TLS with nobody pinned would accept no one, which is a configuration
-    /// mistake worth naming at startup rather than at the first connection.
+    /// mistake worth naming at startup rather than at the first connection --
+    /// on loopback as much as anywhere else, since the bind address has nothing
+    /// to do with the mistake.
     #[test]
     fn tls_without_any_pinned_worker_is_refused() {
+        for bind in ["0.0.0.0:8081", "127.0.0.1:8081"] {
+            let config: WorkersConfig = serde_yaml::from_str(&format!(
+                "enabled: true\nbind: \"{bind}\"\ntls:\n  server_cert: /a.pem\n  server_key: /b.pem\n",
+            ))
+            .expect("parses");
+
+            let err = config.validate().expect_err("must be refused");
+            assert!(err.contains("allowed"), "names the empty list: {err}");
+        }
+    }
+
+    /// The listener keys workers by their certificate's fingerprint, so a
+    /// certificate reused across two entries leaves one of the names dead with
+    /// nothing to show for it.
+    #[test]
+    fn the_same_certificate_pinned_twice_is_refused() {
         let config: WorkersConfig = serde_yaml::from_str(
-            "enabled: true\nbind: \"0.0.0.0:8081\"\ntls:\n  server_cert: /a.pem\n  server_key: /b.pem\n",
+            "enabled: true\nbind: \"127.0.0.1:8081\"\ntls:\n  server_cert: /a.pem\n  server_key: /b.pem\nallowed:\n  - name: gpu-1\n    certificate: /etc/callmind/shared.pem\n  - name: gpu-2\n    certificate: /etc/callmind/shared.pem\n",
         )
         .expect("parses");
 
         let err = config.validate().expect_err("must be refused");
-        assert!(err.contains("allowed"), "names the empty list: {err}");
+        assert!(err.contains("shared.pem"), "names the certificate: {err}");
+    }
+
+    /// A plugin kind travels as `plugin:<name>`: empty, and the job kind fails
+    /// to parse for the whole call; exotic, and the listener refuses the result
+    /// the worker sends back. Either way the job is dispatched and can never
+    /// complete.
+    #[test]
+    fn a_plugin_kind_that_could_not_round_trip_is_refused() {
+        for bad in ["", "acoustic emotions", "../escape", "emotions!"] {
+            // Both listener states: the pipeline dispatches these jobs whether
+            // or not a worker port is open.
+            for enabled in [true, false] {
+                let config = WorkersConfig {
+                    enabled,
+                    bind: default_workers_bind(),
+                    plugin_kinds: vec![bad.to_string()],
+                    ..WorkersConfig::default()
+                };
+                let err = config.validate().expect_err("must be refused");
+                assert!(err.contains("plugin_kinds"), "names the setting: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_ordinary_plugin_kind_is_allowed() {
+        let config = WorkersConfig {
+            enabled: true,
+            bind: default_workers_bind(),
+            plugin_kinds: vec!["acoustic-emotions".to_string(), "scorecard_v2".to_string()],
+            ..WorkersConfig::default()
+        };
+        config.validate().expect("ordinary names are fine");
+    }
+
+    /// The gate is `AppConfig::validate`, which runs at load. Checked anywhere
+    /// later, a refused configuration would have already started the worker
+    /// pool and the watcher, leaving jobs locked `Running` when the process
+    /// aborted.
+    #[test]
+    fn the_workers_section_is_checked_by_the_whole_config_gate() {
+        let mut config = AppConfig::default();
+        config.workers.enabled = true;
+        config.workers.bind = "0.0.0.0:8081".to_string();
+
+        let err = config
+            .validate()
+            .expect_err("an exposed listener without TLS must not load");
+        assert!(
+            format!("{err}").contains("workers.tls"),
+            "names what is missing: {err}"
+        );
     }
 }
