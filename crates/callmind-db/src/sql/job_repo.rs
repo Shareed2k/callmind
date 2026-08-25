@@ -171,7 +171,20 @@ impl JobRepository for SqlJobRepository {
             .from(Jobs::Table)
             .and_where(Expr::col(Jobs::Status).eq(JobStatus::Pending.as_str()))
             .and_where(Expr::col(Jobs::RunAfter).lte(now.clone()))
+            // Exhaustion is enforced where work is handed out, not where failure
+            // is reported -- the same place graphile-worker puts it, and for the
+            // same reason: `release_stale_locks` returns a job to the queue
+            // without consulting anything, so a worker that leases a job and
+            // dies would otherwise have it handed out forever.
+            .and_where(Expr::col(Jobs::Attempt).lt(Expr::col(Jobs::MaxAttempts)))
             .order_by(Jobs::Priority, Order::Desc)
+            // Then by when the job became due, not when it was created, which is
+            // what makes the reclaim above mean anything and what graphile-worker
+            // orders on. For a job enqueued normally the two are the same
+            // instant, so ordinary work keeps its existing order; a job deferred
+            // by a retry, or pushed back after a stalled lease, correctly waits
+            // behind work that has been due for longer.
+            .order_by(Jobs::RunAfter, Order::Asc)
             .order_by(Jobs::CreatedAt, Order::Asc)
             .limit(1);
         if !kinds.is_empty() {
@@ -288,6 +301,11 @@ impl JobRepository for SqlJobRepository {
                 (Jobs::Status, JobStatus::Pending.as_str().into()),
                 (Jobs::LockedAt, opt(None)),
                 (Jobs::LockedBy, opt(None)),
+                // Reclaimed work goes behind whatever arrived while it hung.
+                // graphile-worker moves `run_at` for the same reason: a job that
+                // keeps stalling would otherwise compete on equal terms with
+                // fresh calls every time it is swept up, and starve them.
+                (Jobs::RunAfter, Utc::now().to_rfc3339().into()),
             ])
             .and_where(Expr::col(Jobs::Status).eq(JobStatus::Running.as_str()))
             .and_where(Expr::col(Jobs::LockedAt).lte(threshold.to_rfc3339()))

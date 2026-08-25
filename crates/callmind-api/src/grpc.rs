@@ -320,6 +320,19 @@ impl Worker for WorkerService {
             .await
             .map_err(|e| Status::internal(format!("job lookup failed: {e}")))?
             .ok_or_else(|| Status::not_found(format!("job {job_id} not found")))?;
+        // Only a plugin job. This RPC completes the job its lease covers, which
+        // is right for a `plugin:*` kind because no local stage follows one --
+        // but a remote worker leases the ordinary pipeline kind too, and that is
+        // the whole point of a GPU worker. A plugin result sent against a
+        // transcription job would otherwise retire it: no transcript, no
+        // analysis, no error. A confused worker is enough; malice is not needed.
+        if !job.kind.is_plugin() {
+            return Err(Status::failed_precondition(format!(
+                "job {job_id} is a {} job, not a plugin job",
+                job.kind
+            )));
+        }
+
         let call_id = job
             .call_id
             .ok_or_else(|| Status::failed_precondition("job is not attached to a call"))?;

@@ -452,11 +452,25 @@ async fn a_worker_can_lease_stream_and_submit() {
 #[tokio::test]
 async fn a_worker_can_submit_a_plugin_result() {
     let mut f = start().await;
+    // A plugin job, not the pipeline job the fixture enqueues: a plugin result
+    // finishes the job its lease covers, so it may only be sent against a job
+    // that has nothing else to do afterwards.
+    f.job_repo
+        .enqueue(
+            &EnqueueJob::new(
+                JobKind::Custom("acoustic-emotions".into()),
+                serde_json::json!({ "call_id": f.call_id.to_string() }),
+            )
+            .with_call_id(f.call_id),
+        )
+        .await
+        .unwrap();
+
     let job = f
         .client
         .lease(v1::LeaseRequest {
             worker_id: "gpu-box-1".into(),
-            kinds: vec![],
+            kinds: vec!["plugin:acoustic-emotions".into()],
         })
         .await
         .unwrap()
@@ -1010,4 +1024,56 @@ async fn a_client_with_no_certificate_is_refused_by_the_tls_listener() {
             );
         }
     }
+}
+
+/// A plugin result may only finish a plugin job.
+///
+/// `submit_plugin_result` completes the job its lease covers, which is right for
+/// a `plugin:*` kind -- no local stage follows one. But a remote worker leases
+/// the ordinary pipeline kind too, with `kinds: []`, and that is the whole point
+/// of a GPU worker. A worker that sends a plugin result against a transcription
+/// job would otherwise retire it: no transcript, no analysis, and no error
+/// anywhere. A confused third-party worker is enough; malice is not required.
+#[tokio::test]
+async fn a_plugin_result_cannot_finish_a_transcription_job() {
+    let mut f = start().await;
+
+    let leased = f
+        .client
+        .lease(v1::LeaseRequest {
+            worker_id: "gpu-1".into(),
+            kinds: vec![],
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .job
+        .expect("the pipeline job");
+    assert_eq!(
+        leased.kind, "ingest_recording",
+        "the fixture leases the pipeline kind"
+    );
+
+    let err = f
+        .client
+        .submit_plugin_result(v1::SubmitPluginResultRequest {
+            worker_id: "gpu-1".into(),
+            job_id: leased.job_id.clone(),
+            plugin: "acoustic-emotions".into(),
+            payload: Some(v1::submit_plugin_result_request::Payload::Json(
+                r#"{"joy":1.0}"#.into(),
+            )),
+        })
+        .await
+        .expect_err("a plugin result must not retire a transcription job");
+
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+
+    let job_id: callmind_core::JobId = leased.job_id.parse().unwrap();
+    let still_running = f.job_repo.get_by_id(job_id).await.unwrap().unwrap();
+    assert_eq!(
+        still_running.status,
+        JobStatus::Running,
+        "the transcription job must still be the worker's to finish"
+    );
 }
