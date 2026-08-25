@@ -173,12 +173,20 @@ impl StatsRepository for SqlStatsRepository {
         counts(&rows)
     }
 
+    /// The error to show for a call, or `None` if its latest job did not fail.
+    ///
+    /// Deliberately the *latest* job rather than the latest *failed* one. Every
+    /// reprocess adds a job without deleting the old ones, so filtering on
+    /// `status = 'failed'` finds a failure that a later success has already
+    /// superseded -- and the detail page keeps its "Processing Failed" banner up
+    /// on a call that completed. A pending or running job reports nothing
+    /// either, so the banner does not reappear mid-reprocess.
     async fn last_job_error(&self, call_id: CallId) -> Result<Option<String>, DbError> {
         let stmt = Query::select()
+            .column(Jobs::Status)
             .column(Jobs::LastError)
             .from(Jobs::Table)
             .and_where(Expr::col(Jobs::CallId).eq(call_id.to_string()))
-            .and_where(Expr::col(Jobs::Status).eq("failed"))
             .order_by(Jobs::CreatedAt, Order::Desc)
             .limit(1)
             .to_owned();
@@ -189,8 +197,10 @@ impl StatsRepository for SqlStatsRepository {
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
         match row {
-            Some(row) => get::<Option<String>>(&row, "last_error"),
-            None => Ok(None),
+            Some(row) if get::<String>(&row, "status")? == "failed" => {
+                get::<Option<String>>(&row, "last_error")
+            }
+            _ => Ok(None),
         }
     }
 }
