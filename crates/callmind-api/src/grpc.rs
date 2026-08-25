@@ -395,4 +395,59 @@ impl Worker for WorkerService {
 
         Ok(Response::new(v1::FailJobResponse {}))
     }
+
+    async fn get_call_context(
+        &self,
+        request: Request<v1::GetCallContextRequest>,
+    ) -> Result<Response<v1::CallContext>, Status> {
+        let identity = self.caller_identity(&request, &request.get_ref().worker_id)?;
+        let req = request.into_inner();
+        let job_id = Self::parse_job_id(&req.job_id)?;
+        self.require_lease(job_id, &identity).await?;
+
+        let job = self
+            .state
+            .job_repo
+            .get_by_id(job_id)
+            .await
+            .map_err(|e| Status::internal(format!("job lookup failed: {e}")))?
+            .ok_or_else(|| Status::not_found(format!("job {job_id} not found")))?;
+
+        let call_id = job
+            .call_id
+            .ok_or_else(|| Status::failed_precondition("job is not attached to a call"))?;
+
+        let transcript_json = self
+            .state
+            .call_repo
+            .get_transcript_json(call_id)
+            .await
+            .map_err(|e| Status::internal(format!("transcript lookup failed: {e}")))?;
+
+        let transcript = match transcript_json {
+            Some(raw) => Some(convert::transcript_to_proto(
+                &serde_json::from_str(&raw)
+                    .map_err(|e| Status::internal(format!("stored transcript is invalid: {e}")))?,
+            )),
+            None => None,
+        };
+
+        // `get_analysis_json` returns `(title, full_analysis_json)`; the worker
+        // gets the JSON, which already carries the title. `None` -- no analysis
+        // committed for this call yet -- is kept as an absent field rather than
+        // collapsed to `""`, so a worker can tell "no analysis" apart from an
+        // analysis that happens to be empty.
+        let analysis_json = self
+            .state
+            .call_repo
+            .get_analysis_json(call_id)
+            .await
+            .map_err(|e| Status::internal(format!("analysis lookup failed: {e}")))?
+            .map(|(_title, json)| json);
+
+        Ok(Response::new(v1::CallContext {
+            transcript,
+            analysis_json,
+        }))
+    }
 }

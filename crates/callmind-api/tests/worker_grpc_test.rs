@@ -159,6 +159,22 @@ async fn start() -> Fixture {
     }
 }
 
+/// Queue another job for the fixture's call, so a test can make explicit that
+/// it needs one leasable rather than relying on the one `harness` already
+/// queued.
+async fn enqueue_job(f: &Fixture) {
+    f.job_repo
+        .enqueue(
+            &EnqueueJob::new(
+                JobKind::IngestRecording,
+                serde_json::json!({ "call_id": f.call_id.to_string() }),
+            )
+            .with_call_id(f.call_id),
+        )
+        .await
+        .unwrap();
+}
+
 /// A self-signed certificate and its key, as PEM. A worker is pinned to exactly
 /// this certificate, so it is its own root.
 fn self_signed(name: &str) -> (String, String) {
@@ -749,4 +765,92 @@ async fn a_worker_that_does_not_hold_the_lease_cannot_fail_the_job() {
     // The call must not have been marked failed by a caller with no lease.
     let call = f.call_repo.get_by_id(f.call_id).await.unwrap().unwrap();
     assert_ne!(call.processing_status, ProcessingStatus::Failed);
+}
+
+/// Scorecards and search indexing need what was said, not the audio. Without
+/// this RPC they cannot run outside the core at all.
+#[tokio::test]
+async fn a_worker_reads_the_transcript_of_the_call_it_holds() {
+    let mut f = start().await;
+    // A real `Transcript`, serialized the way `submit_transcript` stores one --
+    // every field required, since the domain type carries no defaults.
+    let transcript = callmind_transcript::Transcript {
+        call_id: f.call_id,
+        languages: vec![],
+        speakers: vec![],
+        segments: vec![callmind_transcript::TranscriptSegment {
+            id: uuid::Uuid::new_v4(),
+            call_id: f.call_id,
+            sequence: 0,
+            speaker_id: callmind_core::SpeakerId(1),
+            speaker_role: callmind_core::SpeakerRole::Customer,
+            language: callmind_core::Language::Hebrew,
+            text_direction: callmind_transcript::TextDirection::Rtl,
+            start_ms: 0,
+            end_ms: 900,
+            raw_text: "שלום".into(),
+            normalized_text: "שלום".into(),
+            words: vec![],
+        }],
+    };
+    f.call_repo
+        .save_transcript(f.call_id, &serde_json::to_string(&transcript).unwrap())
+        .await
+        .unwrap();
+    enqueue_job(&f).await;
+
+    let leased = f
+        .client
+        .lease(v1::LeaseRequest {
+            worker_id: "w".into(),
+            kinds: vec![],
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .job
+        .expect("a job");
+
+    let context = f
+        .client
+        .get_call_context(v1::GetCallContextRequest {
+            worker_id: "w".into(),
+            job_id: leased.job_id.clone(),
+        })
+        .await
+        .expect("the holder may read the call")
+        .into_inner();
+
+    let transcript = context.transcript.expect("a transcript");
+    assert_eq!(transcript.segments.len(), 1);
+}
+
+/// Otherwise this becomes a way to read the whole archive by guessing job ids.
+#[tokio::test]
+async fn a_worker_without_the_lease_is_refused_the_call() {
+    let mut f = start().await;
+    enqueue_job(&f).await;
+
+    let leased = f
+        .client
+        .lease(v1::LeaseRequest {
+            worker_id: "holder".into(),
+            kinds: vec![],
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .job
+        .expect("a job");
+
+    let err = f
+        .client
+        .get_call_context(v1::GetCallContextRequest {
+            worker_id: "someone-else".into(),
+            job_id: leased.job_id,
+        })
+        .await
+        .expect_err("no lease, no call");
+
+    assert_eq!(err.code(), Code::Aborted, "{err:?}");
 }

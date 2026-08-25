@@ -36,6 +36,12 @@ service Worker {
 
   // Give a job back after a failure.
   rpc FailJob(FailJobRequest) returns (FailJobResponse);
+
+  // Read the call a leased job belongs to.
+  //
+  // Audio alone is not enough for a plugin that judges what was said. Scoped to
+  // the lease: a worker sees only the call whose job it currently holds.
+  rpc GetCallContext(GetCallContextRequest) returns (CallContext);
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +198,26 @@ message Transcript {
   repeated LanguageProbability languages = 2;
   repeated SpeakerMetadata speakers = 3;
   repeated TranscriptSegment segments = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Call context
+// ---------------------------------------------------------------------------
+
+message GetCallContextRequest {
+  string worker_id = 1;
+  string job_id = 2;
+}
+
+message CallContext {
+  // Absent when the call has not been transcribed yet.
+  optional Transcript transcript = 1;
+  // The stored analysis as JSON. Absent when no analysis has been committed
+  // for the call yet, so a worker can tell "no analysis" apart from an
+  // analysis that happens to serialize to an empty payload. Opaque on
+  // purpose: the analysis shape belongs to the service, and a worker that
+  // needs a field reads it by name.
+  optional string analysis_json = 2;
 }
 
 // ---------------------------------------------------------------------------
