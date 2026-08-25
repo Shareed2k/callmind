@@ -26,3 +26,9 @@ Thumbs.db
 
 # Local hook logs from the agent harness.
 .claude/hooks/.logs/
+
+
+# Design notes, specs and plans. Kept on disk, out of the repository: they are
+# working notes about what to build, not part of what ships, and they carry
+# details of closed work the open core has no business publishing.
+docs/
