@@ -419,6 +419,11 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     );
     // Remote worker gRPC listener, on its own port. The contract lives in
     // callmind-worker-proto; workers never touch the database.
+    config
+        .workers
+        .validate()
+        .map_err(|reason| anyhow::anyhow!("Invalid workers configuration: {reason}"))?;
+
     if config.workers.enabled {
         let grpc_addr: std::net::SocketAddr = config
             .workers

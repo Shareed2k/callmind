@@ -103,6 +103,24 @@ watcher:
   watch_dir: "./incoming"
   poll_secs: 5
 
+workers:
+  # Remote processing workers: separate programs, possibly closed-source, that
+  # lease jobs over gRPC. They never touch the database.
+  enabled: false
+  # Loopback needs no certificate. Any other address does, and the server
+  # refuses to start without one -- a worker downloads recordings.
+  bind: "127.0.0.1:8081"
+  # tls:
+  #   server_cert: "/etc/callmind/server.pem"
+  #   server_key: "/etc/callmind/server-key.pem"
+  # Each worker pinned to the certificate it presents. Revoking one is deleting
+  # its entry.
+  # allowed:
+  #   - name: "gpu-1"
+  #     certificate: "/etc/callmind/gpu-1.pem"
+  # Dispatched after every transcript, one job per kind.
+  plugin_kinds: []
+
 # POST each finished call to an HTTP receiver (n8n, a Shortcut, anything that
 # speaks HTTP). Disabled while url is empty -- this is the one setting that sends
 # call content off the machine. Delivery is a queued job, so a receiver that is
