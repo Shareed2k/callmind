@@ -124,13 +124,12 @@ async fn harness() -> Harness {
     }
 }
 
-async fn start() -> Fixture {
-    let h = harness().await;
-
+/// Serve `state` over plain TCP, the way the loopback-only listener runs, and
+/// connect a client presenting no certificate at all.
+async fn serve_plain(state: AppState) -> WorkerClient<Channel> {
     // Ephemeral port so tests can run in parallel.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let state = h.state.clone();
     tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(WorkerServer::new(WorkerService::new(state)))
@@ -139,12 +138,17 @@ async fn start() -> Fixture {
             .unwrap();
     });
 
-    let client = loop {
+    loop {
         match WorkerClient::connect(format!("http://{addr}")).await {
             Ok(c) => break c,
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
         }
-    };
+    }
+}
+
+async fn start() -> Fixture {
+    let h = harness().await;
+    let client = serve_plain(h.state.clone()).await;
 
     Fixture {
         client,
@@ -668,17 +672,81 @@ async fn a_certificate_that_is_not_pinned_is_refused() {
     // not what is pinned.
     let (cert, key) = self_signed("gpu-1");
 
-    let Ok(mut client) = f.connect_with(cert, key).await else {
-        return; // Refused during the handshake, which is also a rejection.
-    };
+    // The pinned worker connects first, so nothing below can be explained away
+    // by the listener not being up yet.
+    let _admitted = f.client_as("gpu-1").await;
 
-    // rustls tears the connection down rather than letting the call through,
-    // so this arrives as a transport error and never reaches the service.
-    client
+    match f.connect_with(cert, key).await {
+        // Refused outright, the strictest possible answer.
+        Err(_) => {}
+        // Admitted only because TLS 1.3 finishes the client's half early;
+        // rustls tears the connection down at the first call instead, so this
+        // arrives as a transport error and never reaches the service.
+        Ok(mut client) => {
+            client
+                .lease(v1::LeaseRequest {
+                    worker_id: "gpu-1".into(),
+                    kinds: vec![],
+                })
+                .await
+                .expect_err("an unpinned certificate must not be able to lease");
+        }
+    }
+}
+
+/// Whether the declared id may be trusted is a property of the configuration,
+/// not of the connection. Once any worker is pinned, a caller that presents no
+/// certificate is refused even on a listener that is not running TLS -- so a
+/// transport that carries no certificate cannot quietly reopen the hole.
+#[tokio::test]
+async fn a_caller_without_a_certificate_is_refused_once_workers_are_pinned() {
+    let h = harness().await;
+    let pinned = HashMap::from([("a-fingerprint".to_string(), "gpu-1".to_string())]);
+    let mut client = serve_plain(h.state.clone().with_worker_names(pinned)).await;
+
+    let err = client
         .lease(v1::LeaseRequest {
             worker_id: "gpu-1".into(),
             kinds: vec![],
         })
         .await
-        .expect_err("an unpinned certificate must not be able to lease");
+        .expect_err("no certificate, but workers are pinned");
+
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+}
+
+/// Giving a job back is a write like any other: a non-retryable failure also
+/// flips the call to Failed, so a worker that does not hold the lease must not
+/// be able to do it.
+#[tokio::test]
+async fn a_worker_that_does_not_hold_the_lease_cannot_fail_the_job() {
+    let mut f = start().await;
+    let job = f
+        .client
+        .lease(v1::LeaseRequest {
+            worker_id: "gpu-box-1".into(),
+            kinds: vec![],
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .job
+        .expect("a job");
+
+    let err = f
+        .client
+        .fail_job(v1::FailJobRequest {
+            worker_id: "gpu-box-2".into(),
+            job_id: job.job_id,
+            error: "not my job to fail".into(),
+            retryable: false,
+        })
+        .await
+        .expect_err("gpu-box-2 holds no lease");
+
+    assert_eq!(err.code(), Code::Aborted, "{err:?}");
+
+    // The call must not have been marked failed by a caller with no lease.
+    let call = f.call_repo.get_by_id(f.call_id).await.unwrap().unwrap();
+    assert_ne!(call.processing_status, ProcessingStatus::Failed);
 }

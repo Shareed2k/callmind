@@ -85,7 +85,7 @@ pub fn pinned_worker_names(
 ///
 /// Over the whole certificate rather than the subject, so a caller cannot take
 /// another worker's name by issuing itself a certificate that claims it.
-pub fn fingerprint(der: &[u8]) -> String {
+pub(crate) fn fingerprint(der: &[u8]) -> String {
     hex::encode(Sha256::digest(der))
 }
 

@@ -48,6 +48,17 @@ impl WorkerService {
     /// there is.
     fn caller_identity<T>(&self, request: &Request<T>, declared: &str) -> Result<String, Status> {
         let Some(certs) = request.peer_certs() else {
+            // Whether to trust the declared id is decided by the configuration,
+            // not by what arrived: if any worker is pinned then identity comes
+            // from certificates, and a caller without one is nobody. Keyed on
+            // the request instead, any future transport that carries no
+            // certificate -- a Unix socket, a terminating proxy -- would
+            // silently hand back the spoofing this removes.
+            if !self.state.worker_names.is_empty() {
+                return Err(Status::unauthenticated(
+                    "workers are pinned to certificates; this connection presented none",
+                ));
+            }
             Self::require_worker_id(declared)?;
             return Ok(declared.to_string());
         };
@@ -345,6 +356,9 @@ impl Worker for WorkerService {
         let identity = self.caller_identity(&request, &request.get_ref().worker_id)?;
         let req = request.into_inner();
         let job_id = Self::parse_job_id(&req.job_id)?;
+        // A non-retryable failure also fails the whole call, so giving a job
+        // back is as much a write as submitting a result is.
+        self.require_lease(job_id, &identity).await?;
 
         warn!(
             "Worker {identity} reported job {job_id} failed (retryable={}): {}",
