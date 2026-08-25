@@ -303,18 +303,20 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     // many there are.
     let plugins: Vec<Arc<dyn callmind_plugin_api::Plugin>> = Vec::new();
 
-    // Nothing leaves the machine unless a receiver is configured, so the pipeline
-    // is handed a queue only in that case.
+    // Nothing leaves the machine unless something is configured to receive it --
+    // an outbound webhook, or at least one remote plugin kind to dispatch jobs
+    // for -- so the pipeline is handed a queue only when one of those applies.
     let webhook_receiver = config.outbound_webhook.url.clone();
-    let webhook_queue: Option<Arc<dyn callmind_db::JobRepository>> = webhook_receiver
-        .as_ref()
-        .map(|_| job_repo.clone() as Arc<dyn callmind_db::JobRepository>);
+    let job_queue: Option<Arc<dyn callmind_db::JobRepository>> = (webhook_receiver.is_some()
+        || !config.workers.plugin_kinds.is_empty())
+    .then(|| job_repo.clone() as Arc<dyn callmind_db::JobRepository>);
 
     let pipeline_handler = CallPipelineHandler {
         call_repo: call_repo.clone(),
         speaker_repo: call_repo.clone(),
-        webhook_queue,
+        job_queue,
         plugins: plugins.clone(),
+        remote_plugin_kinds: config.workers.plugin_kinds.clone(),
         storage: storage.clone(),
         transcriber,
         analyzer: analysis_engine.clone(),

@@ -219,7 +219,7 @@ async fn test_full_pipeline_e2e_real_audio() {
     // worker pools against the same wiring.
     let make_registry = {
         let call_repo = call_repo.clone();
-        let webhook_queue: Arc<dyn JobRepository> = job_repo.clone();
+        let job_queue: Arc<dyn JobRepository> = job_repo.clone();
         let storage = storage.clone();
         let transcriber = transcriber.clone();
         let analysis_engine = analysis_engine.clone();
@@ -231,8 +231,9 @@ async fn test_full_pipeline_e2e_real_audio() {
                     CallPipelineHandler {
                         call_repo: call_repo.clone(),
                         speaker_repo: call_repo.clone(),
-                        webhook_queue: Some(webhook_queue.clone()),
+                        job_queue: Some(job_queue.clone()),
                         plugins: Vec::new(),
+                        remote_plugin_kinds: vec!["acoustic-emotions".to_string()],
                         storage: storage.clone(),
                         transcriber: transcriber.clone(),
                         analyzer: analysis_engine.clone(),
@@ -335,6 +336,18 @@ async fn test_full_pipeline_e2e_real_audio() {
         "a receiver wants the summary without calling back: {}",
         delivery.payload
     );
+
+    // 8. Each configured plugin kind gets its own job, so a remote worker can
+    //    lease it. The core does not know what the plugin does -- only its name.
+    let dispatched = job_repo
+        .fetch_and_lock(
+            "plugin-assert",
+            &[JobKind::Custom("acoustic-emotions".to_string())],
+        )
+        .await
+        .unwrap()
+        .expect("a configured plugin kind must be dispatched");
+    assert_eq!(dispatched.call_id, Some(call.id));
 
     // 7. A retry must reuse the stored transcript rather than transcribing again.
     //
