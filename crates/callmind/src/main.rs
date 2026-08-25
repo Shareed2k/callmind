@@ -521,14 +521,6 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     cancellation_token.cancel();
     server_handle.abort();
 
-    // Transcription is the one blocking stage that can be told to stop: whisper
-    // polls this between decoder steps. Without it a call in flight ran to
-    // completion while shutdown gave up waiting, and the process aborted on the
-    // Metal backend's exit assert instead of stopping.
-    for engine in &stt_engines {
-        engine.request_abort();
-    }
-
     // Deliberately shorter than any sane container stop grace period. Diarization
     // still cannot be cancelled inside `spawn_blocking`, so waiting longer does
     // not help it finish — it only risks SIGKILL arriving before the requeue

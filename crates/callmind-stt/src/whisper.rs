@@ -4,7 +4,6 @@ use crate::traits::SttEngine;
 use async_trait::async_trait;
 use callmind_core::Language;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
@@ -13,8 +12,6 @@ pub struct WhisperCppEngine {
     pub model_path: PathBuf,
     pub info: ModelInfo,
     cached_ctx: Arc<Mutex<Option<Arc<whisper_rs::WhisperContext>>>>,
-    /// Read by whisper.cpp between decoder steps; see [`Self::request_abort`].
-    aborting: Arc<AtomicBool>,
 }
 
 impl WhisperCppEngine {
@@ -28,28 +25,7 @@ impl WhisperCppEngine {
                 backend: "whisper.cpp (Metal/CUDA)".to_string(),
             },
             cached_ctx: Arc::new(Mutex::new(None)),
-            aborting: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    /// Ask any running transcription to stop at the next decoder step.
-    ///
-    /// Inference runs inside `spawn_blocking`, which cannot be cancelled, so
-    /// shutdown used to give up waiting and call `std::process::exit` while a
-    /// transcription still held the GPU context. The Metal backend asserts on
-    /// exactly that -- `GGML_ASSERT([rsets->data count] == 0)`, exit code 134.
-    /// whisper.cpp polls an abort callback between steps, which is the way in.
-    ///
-    /// One-way: an engine asked to stop stays stopped, because the only caller
-    /// is shutdown.
-    pub fn request_abort(&self) {
-        self.aborting.store(true, Ordering::Relaxed);
-    }
-
-    /// Whether a stop has been requested.
-    #[must_use]
-    pub fn is_aborting(&self) -> bool {
-        self.aborting.load(Ordering::Relaxed)
     }
 
     fn get_or_load_context(&self) -> Result<Arc<whisper_rs::WhisperContext>, SttError> {
@@ -159,8 +135,15 @@ impl WhisperCppEngine {
         params.set_print_timestamps(false);
         params.set_single_segment(true);
         params.set_max_len(1);
-        let aborting = self.aborting.clone();
-        params.set_abort_callback_safe(move || aborting.load(Ordering::Relaxed));
+        // No abort callback. whisper-rs 0.16's `set_abort_callback_safe` stores a
+        // `*mut Box<dyn FnMut() -> bool>` but hands whisper a trampoline typed
+        // `*mut F` over the caller's concrete closure, so the callback reads a
+        // fat pointer as if it were the closure and returns whatever byte it
+        // lands on. When that byte is non-zero whisper stops encoding and
+        // `whisper_full` returns -6 -- observed as "failed to encode" on a real
+        // Hebrew call, intermittently, because the answer depends on the heap.
+        // Nothing upstream fixes it: 0.16.0 is the latest release and the crate's
+        // own `abort_callback_safe` field is never populated.
 
         state
             .full(params, &samples)
@@ -184,7 +167,6 @@ impl SttEngine for WhisperCppEngine {
         let lang_hint = request.language_hint.as_ref().map(|l| l.code().to_string());
         let cached_ctx = self.cached_ctx.clone();
         let model_path = self.model_path.clone();
-        let aborting_flag = self.aborting.clone();
 
         let result = tokio::task::spawn_blocking(move || -> Result<SttResult, SttError> {
             // Loaded here, not before the spawn: on a cold cache this reads the
@@ -215,8 +197,15 @@ impl SttEngine for WhisperCppEngine {
             params.set_print_progress(false);
             params.set_print_realtime(false);
             params.set_print_timestamps(false);
-            let aborting = aborting_flag.clone();
-            params.set_abort_callback_safe(move || aborting.load(Ordering::Relaxed));
+            // No abort callback. whisper-rs 0.16's `set_abort_callback_safe` stores a
+            // `*mut Box<dyn FnMut() -> bool>` but hands whisper a trampoline typed
+            // `*mut F` over the caller's concrete closure, so the callback reads a
+            // fat pointer as if it were the closure and returns whatever byte it
+            // lands on. When that byte is non-zero whisper stops encoding and
+            // `whisper_full` returns -6 -- observed as "failed to encode" on a real
+            // Hebrew call, intermittently, because the answer depends on the heap.
+            // Nothing upstream fixes it: 0.16.0 is the latest release and the crate's
+            // own `abort_callback_safe` field is never populated.
 
             state
                 .full(params, &audio_samples)
@@ -372,27 +361,6 @@ impl SttEngine for WhisperCppEngine {
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
-
-    /// Inference runs inside `spawn_blocking`, which cannot be cancelled, so the
-    /// server used to give up waiting and call `std::process::exit` while a
-    /// transcription still held the GPU context. The Metal backend asserts on
-    /// that: `GGML_ASSERT([rsets->data count] == 0)`, exit code 134. whisper.cpp
-    /// polls an abort callback between decoder steps, which is the only way in.
-    #[test]
-    fn an_engine_transcribes_until_it_is_asked_to_stop() {
-        let engine = WhisperCppEngine::new("models/stt/none.bin", "test", "1.0");
-        assert!(
-            !engine.is_aborting(),
-            "a fresh engine must not refuse to work"
-        );
-
-        engine.request_abort();
-
-        assert!(
-            engine.is_aborting(),
-            "the running inference has to be able to see the request"
-        );
-    }
 
     #[test]
     fn unloading_weights_that_were_never_loaded_is_harmless() {
