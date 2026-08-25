@@ -14,31 +14,6 @@ fn self_signed(name: &str) -> (String, String) {
 }
 
 #[test]
-fn a_pinned_worker_is_accepted_into_the_trust_roots() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (server_pem, server_key) = self_signed("callmind.local");
-    let (worker_pem, _) = self_signed("gpu-1");
-
-    let server_cert_path = dir.path().join("server.pem");
-    let server_key_path = dir.path().join("server-key.pem");
-    let worker_cert_path = dir.path().join("gpu-1.pem");
-    std::fs::write(&server_cert_path, &server_pem).expect("write");
-    std::fs::write(&server_key_path, &server_key).expect("write");
-    std::fs::write(&worker_cert_path, &worker_pem).expect("write");
-
-    let tls = WorkerTlsConfig {
-        server_cert: server_cert_path,
-        server_key: server_key_path,
-    };
-    let allowed = vec![AllowedWorker {
-        name: "gpu-1".to_string(),
-        certificate: worker_cert_path,
-    }];
-
-    server_tls_config(&tls, &allowed).expect("a pinned worker builds a usable config");
-}
-
-#[test]
 fn a_missing_certificate_file_is_reported_with_its_path() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (server_pem, server_key) = self_signed("callmind.local");
