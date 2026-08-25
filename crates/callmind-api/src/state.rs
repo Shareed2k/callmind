@@ -3,6 +3,7 @@ use callmind_config::AppConfig;
 use callmind_db::{CallRepository, JobRepository, StatsRepository};
 use callmind_search::{AskEngine, SearchEngine};
 use callmind_storage::RecordingStorage;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Shared application state injected into Axum route handlers.
@@ -24,6 +25,12 @@ pub struct AppState {
     pub analyzer: Arc<AnalysisEngine>,
     /// Runtime HTML templates, including any a plugin has registered.
     pub templates: Arc<callmind_ui::templates::TemplateRegistry>,
+    /// SHA-256 of each pinned worker certificate, to the worker's name.
+    ///
+    /// Empty when the worker listener runs without TLS, where there is no
+    /// certificate to look up. Empty *with* TLS means nobody is recognised and
+    /// every worker RPC is refused, which is the safe way to fail.
+    pub worker_names: Arc<HashMap<String, String>>,
 }
 
 impl AppState {
@@ -50,6 +57,17 @@ impl AppState {
             ask,
             analyzer,
             templates,
+            worker_names: Arc::new(HashMap::new()),
         }
+    }
+
+    /// Pin the worker certificates the listener will accept.
+    ///
+    /// Separate from `new` because only the worker listener needs it and only
+    /// when it runs TLS; every other caller would pass an empty map.
+    #[must_use]
+    pub fn with_worker_names(mut self, worker_names: HashMap<String, String>) -> Self {
+        self.worker_names = Arc::new(worker_names);
+        self
     }
 }

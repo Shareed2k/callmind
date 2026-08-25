@@ -303,18 +303,20 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     // many there are.
     let plugins: Vec<Arc<dyn callmind_plugin_api::Plugin>> = Vec::new();
 
-    // Nothing leaves the machine unless a receiver is configured, so the pipeline
-    // is handed a queue only in that case.
+    // Nothing leaves the machine unless something is configured to receive it --
+    // an outbound webhook, or at least one remote plugin kind to dispatch jobs
+    // for -- so the pipeline is handed a queue only when one of those applies.
     let webhook_receiver = config.outbound_webhook.url.clone();
-    let webhook_queue: Option<Arc<dyn callmind_db::JobRepository>> = webhook_receiver
-        .as_ref()
-        .map(|_| job_repo.clone() as Arc<dyn callmind_db::JobRepository>);
+    let job_queue: Option<Arc<dyn callmind_db::JobRepository>> = (webhook_receiver.is_some()
+        || !config.workers.plugin_kinds.is_empty())
+    .then(|| job_repo.clone() as Arc<dyn callmind_db::JobRepository>);
 
     let pipeline_handler = CallPipelineHandler {
         call_repo: call_repo.clone(),
         speaker_repo: call_repo.clone(),
-        webhook_queue,
+        job_queue,
         plugins: plugins.clone(),
+        remote_plugin_kinds: config.workers.plugin_kinds.clone(),
         storage: storage.clone(),
         transcriber,
         analyzer: analysis_engine.clone(),
@@ -405,6 +407,21 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     }
     let templates = Arc::new(template_registry);
 
+    // Remote worker gRPC listener, on its own port. The contract lives in
+    // callmind-worker-proto; workers never touch the database. The section was
+    // validated with the rest of the configuration, before anything started.
+    //
+    // A handshake yields a certificate, never the name beside it in the
+    // configuration, so the listener needs this to turn one into the other.
+    // Read at startup so a missing or malformed file stops the process rather
+    // than locking every worker out at its first call.
+    let worker_names = if config.workers.enabled && config.workers.tls.is_some() {
+        callmind_api::grpc_tls::pinned_worker_names(&config.workers.allowed)
+            .context("Failed to read the pinned worker certificates")?
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let app_state = AppState::new(
         config.clone(),
         call_repo.clone(),
@@ -416,9 +433,9 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         ask_engine,
         analysis_engine,
         templates,
-    );
-    // Remote worker gRPC listener, on its own port. The contract lives in
-    // callmind-worker-proto; workers never touch the database.
+    )
+    .with_worker_names(worker_names);
+
     if config.workers.enabled {
         let grpc_addr: std::net::SocketAddr = config
             .workers
@@ -426,10 +443,27 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
             .parse()
             .context(format!("Invalid workers.bind: {}", config.workers.bind))?;
         let service = callmind_api::grpc::WorkerService::new(app_state.clone());
-        let grpc_token = cancellation_token.clone();
         info!("CallMind worker gRPC listening on {grpc_addr}");
+
+        let mut builder = tonic::transport::Server::builder();
+        if let Some(tls) = &config.workers.tls {
+            let tls_config =
+                callmind_api::grpc_tls::server_tls_config(tls, &config.workers.allowed)
+                    .context("Failed to configure worker TLS")?;
+            builder = builder
+                .tls_config(tls_config)
+                .context("Failed to apply worker TLS")?;
+            info!(
+                "Worker listener requires a client certificate; {} worker(s) pinned",
+                config.workers.allowed.len()
+            );
+        } else {
+            warn!("Worker listener has no TLS; only loopback is allowed in this mode");
+        }
+
+        let grpc_token = cancellation_token.clone();
         tokio::spawn(async move {
-            let server = tonic::transport::Server::builder()
+            let server = builder
                 .add_service(callmind_worker_proto::WorkerServer::new(service))
                 .serve_with_shutdown(grpc_addr, async move { grpc_token.cancelled().await });
             if let Err(e) = server.await {

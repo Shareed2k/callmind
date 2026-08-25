@@ -39,22 +39,57 @@ impl WorkerService {
         Ok(())
     }
 
+    /// Who is calling.
+    ///
+    /// From the client certificate when the listener runs TLS, which is what
+    /// makes the answer unforgeable: a caller can put any string in
+    /// `worker_id`, so that field is a label for logs. Without TLS -- loopback
+    /// only, refused for any other address at startup -- the declared id is all
+    /// there is.
+    fn caller_identity<T>(&self, request: &Request<T>, declared: &str) -> Result<String, Status> {
+        let Some(certs) = request.peer_certs() else {
+            // Whether to trust the declared id is decided by the configuration,
+            // not by what arrived: if any worker is pinned then identity comes
+            // from certificates, and a caller without one is nobody. Keyed on
+            // the request instead, any future transport that carries no
+            // certificate -- a Unix socket, a terminating proxy -- would
+            // silently hand back the spoofing this removes.
+            if !self.state.worker_names.is_empty() {
+                return Err(Status::unauthenticated(
+                    "workers are pinned to certificates; this connection presented none",
+                ));
+            }
+            Self::require_worker_id(declared)?;
+            return Ok(declared.to_string());
+        };
+
+        let leaf = certs
+            .first()
+            .ok_or_else(|| Status::unauthenticated("no client certificate presented"))?;
+
+        self.state
+            .worker_names
+            .get(&crate::grpc_tls::fingerprint(leaf))
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("client certificate is not pinned"))
+    }
+
     /// Confirm the caller still owns the lease.
     ///
     /// Checked before accepting any work so a worker whose lease was reaped
     /// cannot overwrite a result another worker is producing.
-    async fn require_lease(&self, job_id: JobId, worker_id: &str) -> Result<(), Status> {
+    async fn require_lease(&self, job_id: JobId, identity: &str) -> Result<(), Status> {
         let held = self
             .state
             .job_repo
-            .renew_lock(job_id, worker_id)
+            .renew_lock(job_id, identity)
             .await
             .map_err(|e| Status::internal(format!("lease check failed: {e}")))?;
         if held {
             Ok(())
         } else {
             Err(Status::aborted(format!(
-                "lease for job {job_id} is not held by {worker_id}"
+                "lease for job {job_id} is not held by {identity}"
             )))
         }
     }
@@ -66,8 +101,8 @@ impl Worker for WorkerService {
         &self,
         request: Request<v1::LeaseRequest>,
     ) -> Result<Response<v1::LeaseResponse>, Status> {
+        let identity = self.caller_identity(&request, &request.get_ref().worker_id)?;
         let req = request.into_inner();
-        Self::require_worker_id(&req.worker_id)?;
 
         let kinds: Vec<JobKind> = if req.kinds.is_empty() {
             vec![JobKind::IngestRecording]
@@ -85,7 +120,7 @@ impl Worker for WorkerService {
         let leased = self
             .state
             .job_repo
-            .fetch_and_lock(&req.worker_id, &kinds)
+            .fetch_and_lock(&identity, &kinds)
             .await
             .map_err(|e| Status::internal(format!("lease failed: {e}")))?;
 
@@ -116,7 +151,7 @@ impl Worker for WorkerService {
             .unwrap_or_default()
             .to_string();
 
-        info!("Leased job {} to worker {}", job.id, req.worker_id);
+        info!("Leased job {} to worker {}", job.id, identity);
         Ok(Response::new(v1::LeaseResponse {
             job: Some(v1::Job {
                 job_id: job.id.to_string(),
@@ -141,10 +176,10 @@ impl Worker for WorkerService {
         &self,
         request: Request<v1::StreamRecordingRequest>,
     ) -> Result<Response<Self::StreamRecordingStream>, Status> {
+        let identity = self.caller_identity(&request, &request.get_ref().worker_id)?;
         let req = request.into_inner();
-        Self::require_worker_id(&req.worker_id)?;
         let job_id = Self::parse_job_id(&req.job_id)?;
-        self.require_lease(job_id, &req.worker_id).await?;
+        self.require_lease(job_id, &identity).await?;
 
         let job = self
             .state
@@ -188,14 +223,14 @@ impl Worker for WorkerService {
         &self,
         request: Request<v1::HeartbeatRequest>,
     ) -> Result<Response<v1::HeartbeatResponse>, Status> {
+        let identity = self.caller_identity(&request, &request.get_ref().worker_id)?;
         let req = request.into_inner();
-        Self::require_worker_id(&req.worker_id)?;
         let job_id = Self::parse_job_id(&req.job_id)?;
 
         let still_leased = self
             .state
             .job_repo
-            .renew_lock(job_id, &req.worker_id)
+            .renew_lock(job_id, &identity)
             .await
             .map_err(|e| Status::internal(format!("heartbeat failed: {e}")))?;
 
@@ -208,10 +243,10 @@ impl Worker for WorkerService {
         &self,
         request: Request<v1::SubmitTranscriptRequest>,
     ) -> Result<Response<v1::SubmitTranscriptResponse>, Status> {
+        let identity = self.caller_identity(&request, &request.get_ref().worker_id)?;
         let req = request.into_inner();
-        Self::require_worker_id(&req.worker_id)?;
         let job_id = Self::parse_job_id(&req.job_id)?;
-        self.require_lease(job_id, &req.worker_id).await?;
+        self.require_lease(job_id, &identity).await?;
 
         let job = self
             .state
@@ -248,8 +283,7 @@ impl Worker for WorkerService {
             .map_err(|e| Status::internal(format!("failed to requeue job: {e}")))?;
 
         info!(
-            "Worker {} submitted a transcript for call {call_id} ({segments_stored} segments)",
-            req.worker_id
+            "Worker {identity} submitted a transcript for call {call_id} ({segments_stored} segments)"
         );
         Ok(Response::new(v1::SubmitTranscriptResponse {
             segments_stored: u32::try_from(segments_stored).unwrap_or(u32::MAX),
@@ -260,10 +294,10 @@ impl Worker for WorkerService {
         &self,
         request: Request<v1::SubmitPluginResultRequest>,
     ) -> Result<Response<v1::SubmitPluginResultResponse>, Status> {
+        let identity = self.caller_identity(&request, &request.get_ref().worker_id)?;
         let req = request.into_inner();
-        Self::require_worker_id(&req.worker_id)?;
         let job_id = Self::parse_job_id(&req.job_id)?;
-        self.require_lease(job_id, &req.worker_id).await?;
+        self.require_lease(job_id, &identity).await?;
 
         let plugin = req.plugin.trim();
         if plugin.is_empty() {
@@ -286,6 +320,19 @@ impl Worker for WorkerService {
             .await
             .map_err(|e| Status::internal(format!("job lookup failed: {e}")))?
             .ok_or_else(|| Status::not_found(format!("job {job_id} not found")))?;
+        // Only a plugin job. This RPC completes the job its lease covers, which
+        // is right for a `plugin:*` kind because no local stage follows one --
+        // but a remote worker leases the ordinary pipeline kind too, and that is
+        // the whole point of a GPU worker. A plugin result sent against a
+        // transcription job would otherwise retire it: no transcript, no
+        // analysis, no error. A confused worker is enough; malice is not needed.
+        if !job.kind.is_plugin() {
+            return Err(Status::failed_precondition(format!(
+                "job {job_id} is a {} job, not a plugin job",
+                job.kind
+            )));
+        }
+
         let call_id = job
             .call_id
             .ok_or_else(|| Status::failed_precondition("job is not attached to a call"))?;
@@ -311,10 +358,17 @@ impl Worker for WorkerService {
             .await
             .map_err(|e| Status::internal(format!("failed to store plugin result: {e}")))?;
 
-        info!(
-            "Worker {} stored {plugin} result for call {call_id}",
-            req.worker_id
-        );
+        // The end of the job, unlike `submit_transcript`: no local stage follows
+        // a plugin result, and the pool never leases `plugin:*` kinds, so
+        // nothing else would ever finish it. Left running, the stale-lock sweep
+        // would return it to the queue and the plugin would run again forever.
+        self.state
+            .job_repo
+            .mark_completed(job_id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to complete job: {e}")))?;
+
+        info!("Worker {identity} stored {plugin} result for call {call_id}");
         Ok(Response::new(v1::SubmitPluginResultResponse {}))
     }
 
@@ -322,13 +376,16 @@ impl Worker for WorkerService {
         &self,
         request: Request<v1::FailJobRequest>,
     ) -> Result<Response<v1::FailJobResponse>, Status> {
+        let identity = self.caller_identity(&request, &request.get_ref().worker_id)?;
         let req = request.into_inner();
-        Self::require_worker_id(&req.worker_id)?;
         let job_id = Self::parse_job_id(&req.job_id)?;
+        // A non-retryable failure also fails the whole call, so giving a job
+        // back is as much a write as submitting a result is.
+        self.require_lease(job_id, &identity).await?;
 
         warn!(
-            "Worker {} reported job {job_id} failed (retryable={}): {}",
-            req.worker_id, req.retryable, req.error
+            "Worker {identity} reported job {job_id} failed (retryable={}): {}",
+            req.retryable, req.error
         );
 
         let job = self
@@ -360,5 +417,60 @@ impl Worker for WorkerService {
         }
 
         Ok(Response::new(v1::FailJobResponse {}))
+    }
+
+    async fn get_call_context(
+        &self,
+        request: Request<v1::GetCallContextRequest>,
+    ) -> Result<Response<v1::CallContext>, Status> {
+        let identity = self.caller_identity(&request, &request.get_ref().worker_id)?;
+        let req = request.into_inner();
+        let job_id = Self::parse_job_id(&req.job_id)?;
+        self.require_lease(job_id, &identity).await?;
+
+        let job = self
+            .state
+            .job_repo
+            .get_by_id(job_id)
+            .await
+            .map_err(|e| Status::internal(format!("job lookup failed: {e}")))?
+            .ok_or_else(|| Status::not_found(format!("job {job_id} not found")))?;
+
+        let call_id = job
+            .call_id
+            .ok_or_else(|| Status::failed_precondition("job is not attached to a call"))?;
+
+        let transcript_json = self
+            .state
+            .call_repo
+            .get_transcript_json(call_id)
+            .await
+            .map_err(|e| Status::internal(format!("transcript lookup failed: {e}")))?;
+
+        let transcript = match transcript_json {
+            Some(raw) => Some(convert::transcript_to_proto(
+                &serde_json::from_str(&raw)
+                    .map_err(|e| Status::internal(format!("stored transcript is invalid: {e}")))?,
+            )),
+            None => None,
+        };
+
+        // `get_analysis_json` returns `(title, full_analysis_json)`; the worker
+        // gets the JSON, which already carries the title. `None` -- no analysis
+        // committed for this call yet -- is kept as an absent field rather than
+        // collapsed to `""`, so a worker can tell "no analysis" apart from an
+        // analysis that happens to be empty.
+        let analysis_json = self
+            .state
+            .call_repo
+            .get_analysis_json(call_id)
+            .await
+            .map_err(|e| Status::internal(format!("analysis lookup failed: {e}")))?
+            .map(|(_title, json)| json);
+
+        Ok(Response::new(v1::CallContext {
+            transcript,
+            analysis_json,
+        }))
     }
 }
