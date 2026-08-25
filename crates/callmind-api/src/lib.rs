@@ -10,6 +10,7 @@
 pub mod bots;
 pub mod errors;
 pub mod grpc;
+pub mod grpc_tls;
 pub mod openapi;
 pub mod routes;
 pub mod state;

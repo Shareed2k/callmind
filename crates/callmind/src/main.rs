@@ -431,10 +431,27 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
             .parse()
             .context(format!("Invalid workers.bind: {}", config.workers.bind))?;
         let service = callmind_api::grpc::WorkerService::new(app_state.clone());
-        let grpc_token = cancellation_token.clone();
         info!("CallMind worker gRPC listening on {grpc_addr}");
+
+        let mut builder = tonic::transport::Server::builder();
+        if let Some(tls) = &config.workers.tls {
+            let tls_config =
+                callmind_api::grpc_tls::server_tls_config(tls, &config.workers.allowed)
+                    .context("Failed to configure worker TLS")?;
+            builder = builder
+                .tls_config(tls_config)
+                .context("Failed to apply worker TLS")?;
+            info!(
+                "Worker listener requires a client certificate; {} worker(s) pinned",
+                config.workers.allowed.len()
+            );
+        } else {
+            warn!("Worker listener has no TLS; only loopback is allowed in this mode");
+        }
+
+        let grpc_token = cancellation_token.clone();
         tokio::spawn(async move {
-            let server = tonic::transport::Server::builder()
+            let server = builder
                 .add_service(callmind_worker_proto::WorkerServer::new(service))
                 .serve_with_shutdown(grpc_addr, async move { grpc_token.cancelled().await });
             if let Err(e) = server.await {

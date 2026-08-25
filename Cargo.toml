@@ -135,6 +135,6 @@ whatlang = "0.18"
 
 minijinja = { version = "2.24", features = ["loader"] }
 prost = "0.14"
-tonic = "0.14"
+tonic = { version = "0.14", features = ["tls-ring"] }
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"

@@ -53,3 +53,4 @@ subtle = "2.6"
 callmind-stt = { workspace = true, features = ["mock"] }
 callmind-llm = { workspace = true, features = ["mock"] }
 tokio-stream.workspace = true
+rcgen = "0.14"
