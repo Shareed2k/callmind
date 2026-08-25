@@ -345,6 +345,16 @@ impl Worker for WorkerService {
             .await
             .map_err(|e| Status::internal(format!("failed to store plugin result: {e}")))?;
 
+        // The end of the job, unlike `submit_transcript`: no local stage follows
+        // a plugin result, and the pool never leases `plugin:*` kinds, so
+        // nothing else would ever finish it. Left running, the stale-lock sweep
+        // would return it to the queue and the plugin would run again forever.
+        self.state
+            .job_repo
+            .mark_completed(job_id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to complete job: {e}")))?;
+
         info!("Worker {identity} stored {plugin} result for call {call_id}");
         Ok(Response::new(v1::SubmitPluginResultResponse {}))
     }

@@ -13,8 +13,8 @@ use callmind_core::{
     Call, CallDirection, CallId, EnqueueJob, JobKind, JobStatus, OrgId, ProcessingStatus, Recording,
 };
 use callmind_db::{
-    CallRepository, JobRepository, SqlCallRepository, SqlJobRepository, SqlSearchIndex,
-    SqlStatsRepository, create_sqlite_pool, orm_connection, run_migrations,
+    AnalysisRow, CallRepository, JobRepository, SqlCallRepository, SqlJobRepository,
+    SqlSearchIndex, SqlStatsRepository, create_sqlite_pool, orm_connection, run_migrations,
 };
 use callmind_llm::MockLlmEngine;
 use callmind_search::{AskEngine, SearchEngine};
@@ -464,10 +464,41 @@ async fn a_worker_can_submit_a_plugin_result() {
         .job
         .unwrap();
 
-    f.client
+    // The refusals come first: an accepted result finishes the job, and a
+    // finished job has no lease left to submit under.
+
+    // A plugin name that could escape a storage key or a template path.
+    let err = f
+        .client
         .submit_plugin_result(v1::SubmitPluginResultRequest {
             worker_id: "gpu-box-1".into(),
             job_id: job.job_id.clone(),
+            plugin: "../escape".into(),
+            payload: Some(v1::submit_plugin_result_request::Payload::Json("{}".into())),
+        })
+        .await
+        .expect_err("plugin names must be restricted");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    // The JSON escape hatch must actually be JSON.
+    let err = f
+        .client
+        .submit_plugin_result(v1::SubmitPluginResultRequest {
+            worker_id: "gpu-box-1".into(),
+            job_id: job.job_id.clone(),
+            plugin: "custom".into(),
+            payload: Some(v1::submit_plugin_result_request::Payload::Json(
+                "not json".into(),
+            )),
+        })
+        .await
+        .expect_err("non-JSON payloads must be refused");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    f.client
+        .submit_plugin_result(v1::SubmitPluginResultRequest {
+            worker_id: "gpu-box-1".into(),
+            job_id: job.job_id,
             plugin: "acoustic-emotions".into(),
             payload: Some(v1::submit_plugin_result_request::Payload::SpeakerEmotions(
                 v1::SpeakerEmotions {
@@ -493,34 +524,6 @@ async fn a_worker_can_submit_a_plugin_result() {
     assert_eq!(results[0].0, "acoustic-emotions");
     assert!(results[0].1.contains("wav2vec2-emotion"));
     assert!(results[0].1.contains("\"dominant\":\"joy\""));
-
-    // A plugin name that could escape a storage key or a template path.
-    let err = f
-        .client
-        .submit_plugin_result(v1::SubmitPluginResultRequest {
-            worker_id: "gpu-box-1".into(),
-            job_id: job.job_id.clone(),
-            plugin: "../escape".into(),
-            payload: Some(v1::submit_plugin_result_request::Payload::Json("{}".into())),
-        })
-        .await
-        .expect_err("plugin names must be restricted");
-    assert_eq!(err.code(), Code::InvalidArgument);
-
-    // The JSON escape hatch must actually be JSON.
-    let err = f
-        .client
-        .submit_plugin_result(v1::SubmitPluginResultRequest {
-            worker_id: "gpu-box-1".into(),
-            job_id: job.job_id,
-            plugin: "custom".into(),
-            payload: Some(v1::submit_plugin_result_request::Payload::Json(
-                "not json".into(),
-            )),
-        })
-        .await
-        .expect_err("non-JSON payloads must be refused");
-    assert_eq!(err.code(), Code::InvalidArgument);
 }
 
 #[tokio::test]
@@ -821,8 +824,51 @@ async fn a_worker_reads_the_transcript_of_the_call_it_holds() {
         .expect("the holder may read the call")
         .into_inner();
 
-    let transcript = context.transcript.expect("a transcript");
-    assert_eq!(transcript.segments.len(), 1);
+    let proto = context.transcript.expect("a transcript");
+    assert_eq!(proto.segments.len(), 1);
+    // Absent, not empty: the field is `optional` on the wire precisely so a
+    // worker can tell "not analysed yet" from an analysis that says nothing.
+    assert!(
+        context.analysis_json.is_none(),
+        "no analysis is committed yet"
+    );
+
+    f.call_repo
+        .commit_analysis(
+            &AnalysisRow {
+                id: uuid::Uuid::new_v4(),
+                call_id: f.call_id,
+                title: "a returned package",
+                summary: "the customer wants a refund",
+                reason: None,
+                resolution: None,
+                resolved: true,
+                customer_intent: Some("refund"),
+                sentiment_score: 0.5,
+                metrics_json: "{}",
+                full_analysis_json: r#"{"title":"a returned package"}"#,
+                created_at: chrono::Utc::now(),
+            },
+            ProcessingStatus::Completed,
+        )
+        .await
+        .unwrap();
+
+    let context = f
+        .client
+        .get_call_context(v1::GetCallContextRequest {
+            worker_id: "w".into(),
+            job_id: leased.job_id,
+        })
+        .await
+        .expect("the holder may read the call")
+        .into_inner();
+
+    assert_eq!(
+        context.analysis_json.as_deref(),
+        Some(r#"{"title":"a returned package"}"#),
+        "the stored analysis reaches the worker verbatim"
+    );
 }
 
 /// Otherwise this becomes a way to read the whole archive by guessing job ids.
@@ -853,4 +899,115 @@ async fn a_worker_without_the_lease_is_refused_the_call() {
         .expect_err("no lease, no call");
 
     assert_eq!(err.code(), Code::Aborted, "{err:?}");
+}
+
+/// Nothing else can finish a plugin job: the local pool only leases the kinds it
+/// has handlers for, and `plugin:*` is never one of them. Left `Running`, the
+/// stale-lock sweep hands the job back to the queue, a worker leases it again
+/// and the plugin runs again -- forever, on whatever GPU is serving it.
+#[tokio::test]
+async fn a_submitted_plugin_result_finishes_the_job() {
+    let mut f = start().await;
+    f.job_repo
+        .enqueue(
+            &EnqueueJob::new(
+                JobKind::Custom("acoustic-emotions".into()),
+                serde_json::json!({ "call_id": f.call_id.to_string() }),
+            )
+            .with_call_id(f.call_id),
+        )
+        .await
+        .unwrap();
+
+    let lease = v1::LeaseRequest {
+        worker_id: "gpu-box-1".into(),
+        kinds: vec!["plugin:acoustic-emotions".into()],
+    };
+    let job = f
+        .client
+        .lease(lease.clone())
+        .await
+        .unwrap()
+        .into_inner()
+        .job
+        .expect("the plugin job is leasable");
+    assert_eq!(job.kind, "plugin:acoustic-emotions");
+
+    f.client
+        .submit_plugin_result(v1::SubmitPluginResultRequest {
+            worker_id: "gpu-box-1".into(),
+            job_id: job.job_id.clone(),
+            plugin: "acoustic-emotions".into(),
+            payload: Some(v1::submit_plugin_result_request::Payload::Json(
+                r#"{"ok":true}"#.into(),
+            )),
+        })
+        .await
+        .unwrap();
+
+    let finished = f
+        .job_repo
+        .get_by_id(job.job_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        finished.status,
+        JobStatus::Completed,
+        "a stored plugin result is the end of the job"
+    );
+
+    let again = f.client.lease(lease).await.unwrap().into_inner();
+    assert!(
+        again.job.is_none(),
+        "a finished plugin job must never be leased again"
+    );
+}
+
+/// That a caller must present a certificate at all is a property of the
+/// listener, not of the service: the config-keyed fallback in
+/// `a_caller_without_a_certificate_is_refused_once_workers_are_pinned` never
+/// reaches a handshake. Without this, "the port demands a certificate" rests
+/// entirely on tonic's `client_auth_optional` defaulting to false.
+///
+/// Asserted on the RPC rather than on `connect`, for the reason spelled out on
+/// `a_certificate_that_is_not_pinned_is_refused`: TLS 1.3 lets the client
+/// finish its half before the server has judged it.
+#[tokio::test]
+async fn a_client_with_no_certificate_is_refused_by_the_tls_listener() {
+    let f = start_with_tls(&["gpu-1"]).await;
+    // A pinned worker connects first, so nothing below is the listener not
+    // being up yet.
+    let _admitted = f.client_as("gpu-1").await;
+
+    // Trusts the server, offers nothing of its own.
+    let tls = tonic::transport::ClientTlsConfig::new()
+        .domain_name("callmind.local")
+        .ca_certificate(tonic::transport::Certificate::from_pem(f.ca_pem.clone()));
+    let endpoint = Channel::from_shared(format!("https://{}", f.addr))
+        .unwrap()
+        .tls_config(tls)
+        .unwrap();
+
+    match endpoint.connect().await {
+        Err(_) => {}
+        Ok(channel) => {
+            let err = WorkerClient::new(channel)
+                .lease(v1::LeaseRequest {
+                    worker_id: "gpu-1".into(),
+                    kinds: vec![],
+                })
+                .await
+                .expect_err("a caller with no certificate must not be able to lease");
+            // A transport error, not a `Status` the service produced: rustls
+            // sent a `CertificateRequired` alert and the request never reached
+            // a handler. Were client authentication optional, this would
+            // instead be the service's own `Unauthenticated`.
+            assert_eq!(
+                err.code(),
+                Code::Unknown,
+                "the listener must refuse the handshake, not the request: {err:?}"
+            );
+        }
+    }
 }
