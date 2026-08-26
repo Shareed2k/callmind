@@ -122,6 +122,19 @@ jobs:
         with:
           key: test-${{ matrix.name }}
 
+      # whisper_engine_test is the only test that runs whisper.cpp itself, and
+      # without a model it skips rather than fails -- which is how a change that
+      # broke every transcription reached a release with CI green. 74 MB, the
+      # smallest multilingual model there is. Kept in step with the
+      # `whisper-tiny` entry in crates/callmind/src/models_cli.rs.
+      - name: Fetch the tiny Whisper model
+        run: |
+          mkdir -p models/stt
+          curl -fsSL --retry 3 -o models/stt/whisper-tiny.bin \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+          echo "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21  models/stt/whisper-tiny.bin" | shasum -a 256 -c -
+          echo "CALLMIND_TEST_STT_MODEL=$PWD/models/stt/whisper-tiny.bin" >> "$GITHUB_ENV"
+
       - name: Run workspace tests
         run: cargo test --locked --workspace ${{ matrix.flags }}
 

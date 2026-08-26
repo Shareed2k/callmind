@@ -56,6 +56,18 @@ pub const REGISTERED_MODELS: &[ModelSpec] = &[
         sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
     },
     ModelSpec {
+        id: "whisper-tiny",
+        kind: "STT Test Fixture",
+        filename: "stt/whisper-tiny.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+        // Not for transcribing anything you care about. It is here because
+        // `crates/callmind-stt/tests/whisper_engine_test.rs` needs a real
+        // whisper model to run against, and it is the only multilingual one
+        // small enough for CI to download on every push.
+        size_mb: 74,
+        sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+    },
+    ModelSpec {
         id: "ivrit-ai-v3",
         kind: "STT Hebrew Fine-Tuned",
         filename: "stt/ivrit-ai-large-v3.bin",

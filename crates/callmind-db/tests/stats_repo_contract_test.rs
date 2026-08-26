@@ -110,3 +110,60 @@ async fn job_counts_and_last_error_match() {
         );
     }
 }
+
+/// A call that failed once and then succeeded is not a failed call.
+///
+/// The detail page draws its "Processing Failed" banner from this method, so a
+/// query that finds the last *failed* job rather than the *last* job leaves the
+/// banner up forever: every reprocess adds a successful job without removing the
+/// old failed one, and the user is told a call that completed did not.
+#[tokio::test]
+async fn a_later_success_clears_the_error() {
+    for (name, conn) in backend::all("t_stats_recovered").await {
+        let call_id = backend::seed_call(&conn, "processing", None).await;
+        let jobs = SqlJobRepository::new(conn.clone());
+        let stats = SqlStatsRepository::new(conn.clone());
+        let call = callmind_core::CallId(call_id);
+
+        let first = jobs
+            .enqueue(
+                &EnqueueJob::new(JobKind::IngestRecording, serde_json::json!({}))
+                    .with_call_id(call),
+            )
+            .await
+            .unwrap();
+        jobs.mark_failed(first, "gpu exploded", None).await.unwrap();
+        assert_eq!(
+            stats.last_job_error(call).await.unwrap().as_deref(),
+            Some("gpu exploded"),
+            "{name}: the failure is current until something newer says otherwise"
+        );
+
+        let second = jobs
+            .enqueue(
+                &EnqueueJob::new(JobKind::IngestRecording, serde_json::json!({}))
+                    .with_call_id(call),
+            )
+            .await
+            .unwrap();
+        jobs.mark_completed(second).await.unwrap();
+        assert_eq!(
+            stats.last_job_error(call).await.unwrap(),
+            None,
+            "{name}: the newest job succeeded, so there is no error to report"
+        );
+
+        // A job still running says nothing either way -- reporting the older
+        // failure would put the banner back mid-reprocess.
+        jobs.enqueue(
+            &EnqueueJob::new(JobKind::IngestRecording, serde_json::json!({})).with_call_id(call),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stats.last_job_error(call).await.unwrap(),
+            None,
+            "{name}: a pending job is not a failure"
+        );
+    }
+}
