@@ -85,7 +85,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: clippy-${{ matrix.name }}
+          key: clippy-${{ matrix.name }}-portable-ggml
 
       - name: Run Clippy lints
         run: cargo clippy --locked --all-targets ${{ matrix.flags }} -- -D warnings
@@ -125,10 +125,15 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Key changed on purpose when GGML_NATIVE was set: whisper-rs-sys declares
+      # `rerun-if-changed`, which replaces cargo's default rebuild trigger, and
+      # never declares `rerun-if-env-changed=GGML_NATIVE`. Without a new key the
+      # natively-compiled library is restored unchanged and the setting does
+      # nothing.
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: test-${{ matrix.name }}
+          key: test-${{ matrix.name }}-portable-ggml
 
       # whisper_engine_test is the only test that runs whisper.cpp itself, and
       # without a model it skips rather than fails -- which is how a change that
