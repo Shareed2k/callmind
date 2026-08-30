@@ -1003,6 +1003,7 @@ name = "callmind-transcript"
 version = "0.2.0"
 dependencies = [
  "callmind-audio",
+ "callmind-config",
  "callmind-core",
  "callmind-diarization",
  "callmind-language",
@@ -1011,6 +1012,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

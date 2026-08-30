@@ -4,6 +4,7 @@
 //! Also handles RTL/LTR normalisation for mixed Hebrew text and exports
 //! calendar events as RFC 5545 `.ics`.
 
+pub mod build;
 pub mod builder;
 pub mod export;
 pub mod labels;
@@ -14,6 +15,7 @@ pub mod rtl;
 pub mod transcriber;
 pub mod vocabulary;
 
+pub use build::{BuildError, BuiltTranscriber, build_transcriber};
 pub use builder::TranscriptBuilder;
 pub use export::TranscriptExporter;
 pub use models::{SpeakerMetadata, TextDirection, Transcript, TranscriptSegment, TranscriptWord};

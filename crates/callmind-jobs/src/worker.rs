@@ -1,7 +1,7 @@
 use crate::errors::JobExecutionError;
 use crate::handler::{JobContext, JobRegistry};
 use callmind_config::JobsConfig;
-use callmind_core::{CallId, ProcessingStatus};
+use callmind_core::{CallId, JobKind, ProcessingStatus};
 use callmind_db::{CallRepository, JobRepository};
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,8 +75,22 @@ impl WorkerPool {
             }
         });
 
+        // Kinds this pool is allowed to take, resolved once. Empty means every
+        // registered kind; a named list is how a host leaves transcription to a
+        // remote worker instead of winning the race for it every time.
+        let allowed: Vec<JobKind> = self
+            .config
+            .kinds
+            .iter()
+            .filter_map(|k| k.parse::<JobKind>().ok())
+            .collect();
+        if !allowed.is_empty() {
+            info!("Worker pool restricted to job kinds: {allowed:?}");
+        }
+
         for worker_idx in 0..self.config.workers {
             let worker_id = format!("worker-{}", worker_idx + 1);
+            let allowed = allowed.clone();
             let job_repo = self.job_repo.clone();
             let registry = self.registry.clone();
             let token = self.cancellation_token.clone();
@@ -88,7 +102,7 @@ impl WorkerPool {
                 trace!("[{worker_id}] Worker task started");
 
                 while !token.is_cancelled() {
-                    let kinds = registry.registered_kinds();
+                    let kinds = restrict(registry.registered_kinds(), &allowed);
                     if kinds.is_empty() {
                         tokio::select! {
                             () = token.cancelled() => break,
@@ -339,5 +353,62 @@ impl WorkerPool {
         if let Some(handle) = self.cleanup_handle {
             let _ = handle.await;
         }
+    }
+}
+
+/// The kinds a pool may lease: everything registered, or only the configured
+/// subset when one is named.
+///
+/// An empty configured list means "no restriction", not "take nothing" -- the
+/// opposite reading would stop every single-machine deployment dead.
+fn restrict(registered: Vec<JobKind>, allowed: &[JobKind]) -> Vec<JobKind> {
+    if allowed.is_empty() {
+        registered
+    } else {
+        registered
+            .into_iter()
+            .filter(|kind| allowed.contains(kind))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod kind_restriction_tests {
+    use super::*;
+
+    /// The default. A single-machine deployment registers handlers and takes
+    /// everything it registered; reading an empty list as "take nothing" would
+    /// stop it dead.
+    #[test]
+    fn an_empty_list_means_no_restriction() {
+        let registered = vec![JobKind::IngestRecording, JobKind::AnalyzeCall];
+        assert_eq!(restrict(registered.clone(), &[]), registered);
+    }
+
+    /// A host that leaves transcription to a GPU box still takes the analysis
+    /// job the worker hands back.
+    #[test]
+    fn a_named_list_keeps_only_what_it_names() {
+        let registered = vec![
+            JobKind::IngestRecording,
+            JobKind::AnalyzeCall,
+            JobKind::DeliverWebhook,
+        ];
+        assert_eq!(
+            restrict(registered, &[JobKind::AnalyzeCall, JobKind::DeliverWebhook]),
+            vec![JobKind::AnalyzeCall, JobKind::DeliverWebhook]
+        );
+    }
+
+    /// Naming a kind nothing handles cannot conjure a handler for it.
+    #[test]
+    fn a_kind_with_no_handler_is_not_leased() {
+        assert!(
+            restrict(
+                vec![JobKind::AnalyzeCall],
+                &[JobKind::Custom("acoustic-emotions".into())]
+            )
+            .is_empty()
+        );
     }
 }

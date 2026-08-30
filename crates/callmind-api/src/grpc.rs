@@ -274,11 +274,19 @@ impl Worker for WorkerService {
             .await
             .map_err(|e| Status::internal(format!("failed to store transcript: {e}")))?;
 
-        // Returned to the queue without consuming an attempt. The service picks
-        // it up, finds the stored transcript and runs only the analysis stage.
+        // Returned to the queue without consuming an attempt, and as a kind no
+        // remote worker leases. A worker has no way to know a transcript now
+        // exists, so a job handed back as `ingest_recording` is one it takes
+        // again and transcribes again -- 102 leases of a single job in ten
+        // minutes, measured, before this changed. What remains needs the LLM
+        // and the database, so it belongs to the service's own pool.
         self.state
             .job_repo
-            .requeue_interrupted(job_id, "Transcribed by remote worker; awaiting analysis")
+            .requeue_as(
+                job_id,
+                &callmind_core::JobKind::AnalyzeCall,
+                "Transcribed by remote worker; awaiting analysis",
+            )
             .await
             .map_err(|e| Status::internal(format!("failed to requeue job: {e}")))?;
 

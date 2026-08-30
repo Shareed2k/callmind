@@ -250,3 +250,45 @@ async fn a_reclaimed_job_yields_to_work_that_arrived_while_it_was_stuck() {
         assert_ne!(next.id, stuck, "{name}");
     }
 }
+
+/// Handing a job back under a different kind, which is how a remote worker's
+/// transcript becomes the service's analysis job.
+///
+/// The kind is what a worker leases on, so this is the whole mechanism keeping
+/// a worker from taking back the job it just finished and transcribing it a
+/// second time.
+#[tokio::test]
+async fn a_job_can_be_handed_back_as_a_different_kind() {
+    for (name, conn) in backend::all("t_job_requeue_as").await {
+        let repo = SqlJobRepository::new(conn);
+        let id = repo.enqueue(&job(JobKind::IngestRecording)).await.unwrap();
+        repo.fetch_and_lock("gpu-box", &[]).await.unwrap().unwrap();
+
+        repo.requeue_as(id, &JobKind::AnalyzeCall, "awaiting analysis")
+            .await
+            .unwrap();
+
+        let back = repo.get_by_id(id).await.unwrap().unwrap();
+        assert_eq!(back.kind, JobKind::AnalyzeCall, "{name}: kind changed");
+        assert_eq!(back.status, JobStatus::Pending, "{name}");
+        assert_eq!(back.attempt, 0, "{name}: changing hands cost an attempt");
+        assert!(back.locked_by.is_none(), "{name}");
+
+        // And a worker asking for the old kind no longer sees it, which is the
+        // behaviour the whole change exists for.
+        assert!(
+            repo.fetch_and_lock("gpu-box", &[JobKind::IngestRecording])
+                .await
+                .unwrap()
+                .is_none(),
+            "{name}: a transcription worker must not get the analysis job back"
+        );
+        assert!(
+            repo.fetch_and_lock("service", &[JobKind::AnalyzeCall])
+                .await
+                .unwrap()
+                .is_some(),
+            "{name}: the service's own pool must still get it"
+        );
+    }
+}

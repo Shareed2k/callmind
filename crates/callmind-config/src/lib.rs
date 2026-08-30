@@ -215,9 +215,45 @@ impl AppConfig {
                 "database.url cannot be empty".into(),
             ));
         }
+        // Not even with remote workers configured. A remote worker offloads
+        // transcription and hands the job back as `analyze_call`, which needs
+        // the LLM and the database -- so the service's own pool has to run it.
+        // Zero workers leaves every call transcribed and never analysed.
+        for kind in &self.jobs.kinds {
+            if kind.parse::<callmind_core::JobKind>().is_err() {
+                return Err(ConfigError::Validation(format!(
+                    "jobs.kinds entry {kind:?} is not a job kind. Use `ingest_recording`, \
+                     `analyze_call`, `deliver_webhook`, or `plugin:<name>`."
+                )));
+            }
+        }
+        if !self.jobs.kinds.is_empty() {
+            // Restricting the pool is how transcription is handed to a remote
+            // worker; excluding analysis instead just stops calls being
+            // analysed, silently, since the jobs queue up with nobody to take
+            // them.
+            if !self.jobs.kinds.iter().any(|k| k == "analyze_call") {
+                return Err(ConfigError::Validation(
+                    "jobs.kinds does not include `analyze_call`, so no call would ever be \
+                     analysed. The analysis stage needs the LLM and the database, so it \
+                     always runs in this process."
+                        .into(),
+                ));
+            }
+            if !self.jobs.kinds.iter().any(|k| k == "ingest_recording") && !self.workers.enabled {
+                return Err(ConfigError::Validation(
+                    "jobs.kinds excludes `ingest_recording` and workers.enabled is false, \
+                     so nothing would ever transcribe. Enable the worker listener, or let \
+                     this host take transcription jobs too."
+                        .into(),
+                ));
+            }
+        }
         if self.jobs.workers == 0 {
             return Err(ConfigError::Validation(
-                "jobs.workers must be at least 1".into(),
+                "jobs.workers must be at least 1. Remote workers offload transcription, \
+                 but the analysis stage runs in this process."
+                    .into(),
             ));
         }
         if self.auth.enabled && self.auth.api_key.as_deref().unwrap_or("").trim().is_empty() {
@@ -352,6 +388,16 @@ pub struct JobsConfig {
     #[serde(default = "default_workers")]
     pub workers: usize,
 
+    /// Job kinds this host's own workers take. Empty means every kind that has
+    /// a handler registered, which is the single-machine default.
+    ///
+    /// Naming them is how a host stops competing with a remote worker. The
+    /// local pool polls every half second and a worker over a network cannot
+    /// win that race, so without this a GPU box would only ever pick up the
+    /// jobs the host happened to miss.
+    #[serde(default)]
+    pub kinds: Vec<String>,
+
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
 
@@ -382,6 +428,7 @@ impl Default for JobsConfig {
     fn default() -> Self {
         Self {
             workers: default_workers(),
+            kinds: Vec::new(),
             poll_interval_ms: default_poll_interval_ms(),
             lock_timeout_secs: default_lock_timeout_secs(),
             max_attempts: default_max_attempts(),
@@ -1114,6 +1161,63 @@ mod worker_tls_config_tests {
 
     /// The worker port is where a remote process leases jobs and downloads
     /// recordings. Exposing it beyond loopback without TLS would let anyone who
+    /// Naming the kinds is how a host stops competing with a GPU box for
+    /// transcription -- the local pool polls every half second, so a worker over
+    /// a network never wins that race otherwise.
+    #[test]
+    fn a_host_can_leave_transcription_to_a_remote_worker() {
+        let mut config = AppConfig::default();
+        config.workers.enabled = true;
+        config.workers.bind = "127.0.0.1:8081".to_string();
+        config.jobs.kinds = vec!["analyze_call".into(), "deliver_webhook".into()];
+        config
+            .validate()
+            .expect("the host analyses, the worker transcribes");
+    }
+
+    #[test]
+    fn a_kinds_list_that_would_strand_work_is_refused() {
+        // Excluding analysis strands every call after transcription...
+        let mut config = AppConfig::default();
+        config.jobs.kinds = vec!["ingest_recording".into()];
+        let err = config.validate().expect_err("nothing would analyse");
+        assert!(err.to_string().contains("analyze_call"), "{err}");
+
+        // ...and excluding transcription with no remote worker strands it
+        // before transcription instead.
+        config.jobs.kinds = vec!["analyze_call".into()];
+        config.workers.enabled = false;
+        let err = config.validate().expect_err("nothing would transcribe");
+        assert!(err.to_string().contains("ingest_recording"), "{err}");
+
+        // A name that is not a kind at all is a typo, not a restriction.
+        config.jobs.kinds = vec!["analyse_call".into()];
+        let err = config.validate().expect_err("a typo must not pass");
+        assert!(err.to_string().contains("analyse_call"), "{err}");
+    }
+
+    /// Offloading transcription to a GPU box does not empty the local pool: the
+    /// worker hands the job back as `analyze_call`, and that stage needs the LLM
+    /// and the database. Zero workers would transcribe every call and analyse
+    /// none of them, with no error anywhere.
+    #[test]
+    fn zero_local_workers_is_refused_even_with_remote_workers_configured() {
+        let mut config = AppConfig::default();
+        config.jobs.workers = 0;
+        config.workers.enabled = true;
+        config.workers.bind = "127.0.0.1:8081".to_string();
+
+        let err = config
+            .validate()
+            .expect_err("the analysis stage would never run");
+        let msg = err.to_string();
+        assert!(msg.contains("jobs.workers"), "names the setting: {msg}");
+        assert!(
+            msg.contains("analysis"),
+            "says why a remote worker does not cover it: {msg}"
+        );
+    }
+
     /// reaches it take a job, download the audio and submit a fabricated
     /// transcript, so the unsafe combination is refused rather than warned about.
     #[test]

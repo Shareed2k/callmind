@@ -86,12 +86,19 @@ impl JobHandler for CallPipelineHandler {
         //
         // `force_retranscribe` in the payload opts out, for when the audio or the
         // STT configuration is what changed.
-        let force_retranscribe = ctx
-            .job
-            .payload
-            .get("force_retranscribe")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        //
+        // Except on an `analyze_call` job, where the flag is spent. That kind
+        // exists because a remote worker has just submitted a fresh transcript,
+        // and the payload it carries is the one the reprocess request wrote --
+        // so honouring the flag here made the host transcribe the same audio a
+        // second time, on the machine the whole arrangement exists to spare.
+        let force_retranscribe = ctx.job.kind != callmind_core::JobKind::AnalyzeCall
+            && ctx
+                .job
+                .payload
+                .get("force_retranscribe")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
 
         let stored_transcript = if force_retranscribe {
             None

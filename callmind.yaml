@@ -27,7 +27,19 @@ storage:
   path: "./data/recordings"
 
 jobs:
+  # In-process workers. At least one, always: a remote worker offloads
+  # transcription and hands the job back as `analyze_call`, and that stage needs
+  # the LLM and the database, so it runs here. Lower this when most
+  # transcription happens on a GPU box, do not zero it.
   workers: 4
+  # Job kinds this host's own workers take. Empty means everything it can
+  # handle, which is right for a single machine. Name them to hand transcription
+  # to a GPU box -- the local pool polls twice a second and a worker over a
+  # network cannot win that race otherwise:
+  #   kinds: ["analyze_call", "deliver_webhook"]
+  # `analyze_call` must stay in any list: it is the stage a remote worker hands
+  # back, and it needs the LLM and the database.
+  kinds: []
   poll_interval_ms: 500
   lock_timeout_secs: 600
   max_attempts: 3

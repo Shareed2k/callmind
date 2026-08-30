@@ -225,27 +225,29 @@ async fn test_full_pipeline_e2e_real_audio() {
         let analysis_engine = analysis_engine.clone();
         let search_engine = search_engine.clone();
         move || {
+            let handler: Arc<dyn callmind_jobs::JobHandler> = Arc::new(CallPipelineHandler {
+                call_repo: call_repo.clone(),
+                speaker_repo: call_repo.clone(),
+                job_queue: Some(job_queue.clone()),
+                plugins: Vec::new(),
+                remote_plugin_kinds: vec!["acoustic-emotions".to_string()],
+                storage: storage.clone(),
+                transcriber: transcriber.clone(),
+                analyzer: analysis_engine.clone(),
+                search: search_engine.clone(),
+            });
+            // Both kinds, as the binary registers them: `analyze_call` is what
+            // a job becomes once a remote worker has submitted its transcript.
             JobRegistry::builder()
-                .register(
-                    JobKind::IngestRecording,
-                    CallPipelineHandler {
-                        call_repo: call_repo.clone(),
-                        speaker_repo: call_repo.clone(),
-                        job_queue: Some(job_queue.clone()),
-                        plugins: Vec::new(),
-                        remote_plugin_kinds: vec!["acoustic-emotions".to_string()],
-                        storage: storage.clone(),
-                        transcriber: transcriber.clone(),
-                        analyzer: analysis_engine.clone(),
-                        search: search_engine.clone(),
-                    },
-                )
+                .register_arc(JobKind::IngestRecording, handler.clone())
+                .register_arc(JobKind::AnalyzeCall, handler)
                 .build()
         }
     };
 
     let jobs_config = JobsConfig {
         workers: 1,
+        kinds: Vec::new(),
         poll_interval_ms: 20,
         lock_timeout_secs: 60,
         max_attempts: 3,
@@ -357,7 +359,7 @@ async fn test_full_pipeline_e2e_real_audio() {
     let marker = r#"{"call_id":"00000000-0000-0000-0000-0000000000ff","languages":[],"speakers":[],"segments":[]}"#;
     call_repo.save_transcript(call.id, marker).await.unwrap();
 
-    let run_again = |payload: serde_json::Value| {
+    let run_again = |kind: JobKind, payload: serde_json::Value| {
         let job_repo = job_repo.clone();
         let call_repo = call_repo.clone();
         let registry = make_registry();
@@ -371,8 +373,7 @@ async fn test_full_pipeline_e2e_real_audio() {
                 .await
                 .unwrap();
 
-            let req = callmind_core::EnqueueJob::new(JobKind::IngestRecording, payload)
-                .with_call_id(call.id);
+            let req = callmind_core::EnqueueJob::new(kind, payload).with_call_id(call.id);
             job_repo.enqueue(&req).await.unwrap();
 
             let token = CancellationToken::new();
@@ -401,7 +402,11 @@ async fn test_full_pipeline_e2e_real_audio() {
         }
     };
 
-    run_again(serde_json::json!({ "call_id": call.id.to_string() })).await;
+    run_again(
+        JobKind::IngestRecording,
+        serde_json::json!({ "call_id": call.id.to_string() }),
+    )
+    .await;
     assert_eq!(
         call_repo
             .get_transcript_json(call.id)
@@ -413,10 +418,13 @@ async fn test_full_pipeline_e2e_real_audio() {
     );
 
     // 8. `force_retranscribe` opts out, for when the audio or STT setup changed.
-    run_again(serde_json::json!({
-        "call_id": call.id.to_string(),
-        "force_retranscribe": true,
-    }))
+    run_again(
+        JobKind::IngestRecording,
+        serde_json::json!({
+            "call_id": call.id.to_string(),
+            "force_retranscribe": true,
+        }),
+    )
     .await;
     assert_ne!(
         call_repo
@@ -426,6 +434,32 @@ async fn test_full_pipeline_e2e_real_audio() {
             .as_deref(),
         Some(marker),
         "force_retranscribe must replace the stored transcript"
+    );
+
+    // 9. On an `analyze_call` job the flag is spent, and honouring it would
+    //    undo the work the whole remote-worker arrangement exists to move.
+    //
+    //    That job kind means a worker has just submitted a fresh transcript;
+    //    the payload it carries is whatever the original reprocess request
+    //    wrote. Measured before this: the host loaded Whisper and transcribed
+    //    the same audio the worker had transcribed seconds earlier.
+    call_repo.save_transcript(call.id, marker).await.unwrap();
+    run_again(
+        JobKind::AnalyzeCall,
+        serde_json::json!({
+            "call_id": call.id.to_string(),
+            "force_retranscribe": true,
+        }),
+    )
+    .await;
+    assert_eq!(
+        call_repo
+            .get_transcript_json(call.id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(marker),
+        "an analysis job must not re-transcribe what a worker just handed over"
     );
 }
 
