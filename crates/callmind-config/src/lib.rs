@@ -215,9 +215,17 @@ impl AppConfig {
                 "database.url cannot be empty".into(),
             ));
         }
-        if self.jobs.workers == 0 {
+        // Zero local workers is a real deployment -- this host serves the queue
+        // and a GPU machine transcribes over gRPC -- but only when something
+        // remote can actually take the work. Without the worker listener there
+        // is nobody at all, and every job would sit `pending` forever while the
+        // UI reported no error.
+        if self.jobs.workers == 0 && !self.workers.enabled {
             return Err(ConfigError::Validation(
-                "jobs.workers must be at least 1".into(),
+                "jobs.workers is 0 and workers.enabled is false, so nothing would ever \
+                 process a job. Raise jobs.workers, or enable the worker listener so a \
+                 remote worker can take the work."
+                    .into(),
             ));
         }
         if self.auth.enabled && self.auth.api_key.as_deref().unwrap_or("").trim().is_empty() {
@@ -1114,6 +1122,36 @@ mod worker_tls_config_tests {
 
     /// The worker port is where a remote process leases jobs and downloads
     /// recordings. Exposing it beyond loopback without TLS would let anyone who
+    /// A host that only serves the queue is a real deployment: this machine
+    /// dispatches and a GPU machine transcribes over gRPC. It stops being real
+    /// the moment nothing remote can connect, because then every job sits
+    /// `pending` and the UI reports no error at all.
+    #[test]
+    fn zero_local_workers_is_allowed_only_when_a_remote_one_can_connect() {
+        let mut config = AppConfig::default();
+        config.jobs.workers = 0;
+
+        config.workers.enabled = false;
+        let err = config
+            .validate()
+            .expect_err("nobody would process a job at all");
+        let msg = err.to_string();
+        assert!(msg.contains("jobs.workers"), "names the setting: {msg}");
+        assert!(
+            msg.contains("workers.enabled"),
+            "names the other half: {msg}"
+        );
+
+        config.workers.enabled = true;
+        // Spelled out because the derived `Default` leaves it empty, where a
+        // configuration loaded from YAML gets the loopback address serde
+        // supplies. An empty bind counts as reachable, and so demands TLS.
+        config.workers.bind = "127.0.0.1:8081".to_string();
+        config
+            .validate()
+            .expect("a remote worker can take everything this host dispatches");
+    }
+
     /// reaches it take a job, download the audio and submit a fabricated
     /// transcript, so the unsafe combination is refused rather than warned about.
     #[test]

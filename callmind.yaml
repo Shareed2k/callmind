@@ -27,6 +27,10 @@ storage:
   path: "./data/recordings"
 
 jobs:
+  # In-process workers. Set to 0 when this host only dispatches and a remote
+  # worker transcribes over gRPC -- allowed only with workers.enabled below,
+  # since otherwise nothing would ever take a job. The stale-lease reaper runs
+  # either way, so a remote worker that dies still gives its job back.
   workers: 4
   poll_interval_ms: 500
   lock_timeout_secs: 600
