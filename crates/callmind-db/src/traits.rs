@@ -169,6 +169,15 @@ pub trait JobRepository: Send + Sync {
     /// for work interrupted by shutdown rather than by failure.
     async fn requeue_interrupted(&self, id: JobId, reason: &str) -> Result<(), DbError>;
 
+    /// Return a job to the queue as a different kind, without consuming an
+    /// attempt.
+    ///
+    /// Used when work has changed hands mid-job: a remote worker submits a
+    /// transcript, and what remains is the analysis stage, which only the
+    /// service itself can run. Handing it back under the kind the worker leases
+    /// would have the worker take it again.
+    async fn requeue_as(&self, id: JobId, kind: &JobKind, reason: &str) -> Result<(), DbError>;
+
     /// Return every running job to the queue without consuming an attempt, for
     /// graceful shutdown. Returns the number requeued.
     async fn requeue_all_running(&self, reason: &str) -> Result<u64, DbError>;

@@ -447,6 +447,17 @@ async fn a_worker_can_lease_stream_and_submit() {
         JobStatus::Pending,
         "job should return to the queue for the analysis stage"
     );
+    // Not `ingest_recording` any more, and that is the whole point. A remote
+    // worker leases by kind and has no idea a transcript now exists, so a job
+    // handed back under its original kind is one the worker takes again and
+    // transcribes again -- measured at 102 leases of one job in ten minutes
+    // before this. Analysis needs the LLM and the database, so it is the
+    // service's own pool that must pick this up.
+    assert_eq!(
+        requeued.kind,
+        JobKind::AnalyzeCall,
+        "the requeued job must be a kind remote workers do not lease"
+    );
 }
 
 #[tokio::test]

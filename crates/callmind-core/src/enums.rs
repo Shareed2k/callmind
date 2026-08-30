@@ -133,6 +133,15 @@ impl FromStr for JobStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum JobKind {
     IngestRecording,
+    /// The analysis half of the pipeline, on a call whose transcript is already
+    /// stored.
+    ///
+    /// A separate kind because a remote worker leases by kind and cannot know a
+    /// transcript exists: a job handed back for analysis under its original
+    /// kind is one the worker takes again and transcribes again. Analysis needs
+    /// the LLM and the database, neither of which a worker has, so this kind is
+    /// the service's own.
+    AnalyzeCall,
     DeliverWebhook,
     /// A stage supplied by a plugin, named by the plugin.
     Custom(String),
@@ -183,6 +192,7 @@ impl JobKind {
         use std::borrow::Cow;
         match self {
             Self::IngestRecording => Cow::Borrowed("ingest_recording"),
+            Self::AnalyzeCall => Cow::Borrowed("analyze_call"),
             Self::DeliverWebhook => Cow::Borrowed("deliver_webhook"),
             Self::Custom(name) => Cow::Owned(format!("{PLUGIN_KIND_PREFIX}{name}")),
         }
@@ -207,6 +217,7 @@ impl FromStr for JobKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "ingest_recording" => Ok(Self::IngestRecording),
+            "analyze_call" => Ok(Self::AnalyzeCall),
             "deliver_webhook" => Ok(Self::DeliverWebhook),
             other => match other.strip_prefix(PLUGIN_KIND_PREFIX) {
                 // An empty plugin name is a bug at the registration site, not a
@@ -371,6 +382,11 @@ mod job_kind_custom_tests {
     /// code enqueued them and no handler was ever registered, so enqueueing one
     /// failed with "No handler registered". Retiring them keeps the enum to what
     /// actually runs, and a plugin can claim any of the names via `plugin:`.
+    ///
+    /// `analyze_call` was on this list and has come back, because both halves of
+    /// the reason are now false: `SubmitTranscript` enqueues it and the binary
+    /// registers a handler for it. It earns its place by keeping a remote worker
+    /// from re-leasing a job it has already transcribed.
     #[test]
     fn retired_stage_kinds_no_longer_parse() {
         for text in [
@@ -380,7 +396,6 @@ mod job_kind_custom_tests {
             "diarize",
             "build_transcript",
             "normalize_transcript",
-            "analyze_call",
             "analyze_emotions",
         ] {
             assert!(

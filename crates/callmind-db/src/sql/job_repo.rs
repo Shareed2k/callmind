@@ -320,29 +320,11 @@ impl JobRepository for SqlJobRepository {
     }
 
     async fn requeue_interrupted(&self, id: JobId, reason: &str) -> Result<(), DbError> {
-        let stmt = Query::update()
-            .table(Jobs::Table)
-            .values([
-                (Jobs::Status, JobStatus::Pending.as_str().into()),
-                // Interrupted work should not cost the job an attempt.
-                (
-                    Jobs::Attempt,
-                    Expr::cust("CASE WHEN attempt > 0 THEN attempt - 1 ELSE 0 END"),
-                ),
-                (Jobs::RunAfter, Utc::now().to_rfc3339().into()),
-                (Jobs::LockedAt, opt(None)),
-                (Jobs::LockedBy, opt(None)),
-                (Jobs::LastError, reason.into()),
-                (Jobs::CompletedAt, opt(None)),
-            ])
-            .and_where(Expr::col(Jobs::Id).eq(id.to_string()))
-            .to_owned();
+        self.requeue(id, None, reason).await
+    }
 
-        self.conn
-            .execute(&stmt)
-            .await
-            .map_err(|e| DbError::Query(e.to_string()))?;
-        Ok(())
+    async fn requeue_as(&self, id: JobId, kind: &JobKind, reason: &str) -> Result<(), DbError> {
+        self.requeue(id, Some(kind), reason).await
     }
 
     async fn requeue_all_running(&self, reason: &str) -> Result<u64, DbError> {
@@ -400,5 +382,41 @@ impl JobRepository for SqlJobRepository {
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
         rows.iter().map(map_job).collect()
+    }
+}
+
+impl SqlJobRepository {
+    /// Return a job to the queue, optionally as a different kind.
+    async fn requeue(
+        &self,
+        id: JobId,
+        kind: Option<&JobKind>,
+        reason: &str,
+    ) -> Result<(), DbError> {
+        let mut stmt = Query::update();
+        stmt.table(Jobs::Table)
+            .values([
+                (Jobs::Status, JobStatus::Pending.as_str().into()),
+                // Interrupted work should not cost the job an attempt.
+                (
+                    Jobs::Attempt,
+                    Expr::cust("CASE WHEN attempt > 0 THEN attempt - 1 ELSE 0 END"),
+                ),
+                (Jobs::RunAfter, Utc::now().to_rfc3339().into()),
+                (Jobs::LockedAt, opt(None)),
+                (Jobs::LockedBy, opt(None)),
+                (Jobs::LastError, reason.into()),
+                (Jobs::CompletedAt, opt(None)),
+            ])
+            .and_where(Expr::col(Jobs::Id).eq(id.to_string()));
+        if let Some(kind) = kind {
+            stmt.value(Jobs::Kind, kind.as_str().to_string());
+        }
+
+        self.conn
+            .execute(&stmt)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(())
     }
 }

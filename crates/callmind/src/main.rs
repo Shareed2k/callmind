@@ -205,8 +205,15 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
 
     // Initialize Job Registry & Worker Pool
     let cancellation_token = CancellationToken::new();
-    let mut registry_builder =
-        JobRegistry::builder().register(JobKind::IngestRecording, pipeline_handler);
+    // The same handler under two kinds. `analyze_call` is what a job becomes
+    // once a remote worker has submitted its transcript: the pipeline finds the
+    // stored transcript and runs only the analysis stage, which is exactly what
+    // it already does on a retry. Remote workers never declare this kind, which
+    // is the point -- see `SubmitTranscript` in the worker service.
+    let pipeline_handler: Arc<dyn callmind_jobs::JobHandler> = Arc::new(pipeline_handler);
+    let mut registry_builder = JobRegistry::builder()
+        .register_arc(JobKind::IngestRecording, pipeline_handler.clone())
+        .register_arc(JobKind::AnalyzeCall, pipeline_handler);
 
     if let Some(url) = webhook_receiver {
         info!(
