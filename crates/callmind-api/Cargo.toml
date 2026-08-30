@@ -47,7 +47,7 @@ reqwest.workspace = true
 anyhow.workspace = true
 sha2.workspace = true
 hex.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 subtle = "2.6"
 
 [dev-dependencies]
