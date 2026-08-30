@@ -31,6 +31,10 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
 # Target modern NVIDIA GPU architectures: Turing (75), Ampere (80, 86), Ada Lovelace (89), Hopper (90)
+# The GPU does the inference, but ggml still compiles CPU kernels, and
+# `-march=native` would bake this builder's instruction set into an image meant
+# to run elsewhere. See the note in Dockerfile.
+ENV GGML_NATIVE=OFF
 ENV CUDAARCHS="75;80;86;89;90" \
     CMAKE_CUDA_ARCHITECTURES="75;80;86;89;90"
 

@@ -11,6 +11,14 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # whisper.cpp compiles with `-march=native` by default, baking in whatever the
+  # build machine happens to support. That is wrong for anything that leaves the
+  # machine: a binary built on a runner with AVX-512 dies with SIGILL on a CPU
+  # without it, and the same applies to a `target/` cache restored onto a
+  # different runner -- which is exactly how this was found. OFF is not "no
+  # optimisation": ggml then enables SSE4.2, AVX, AVX2 and BMI2 explicitly and
+  # leaves AVX-512 off, so the result is portable to any x86_64 since Haswell.
+  GGML_NATIVE: "OFF"
 
 jobs:
   fmt:

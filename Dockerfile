@@ -7,6 +7,13 @@ ARG DEBIAN_FRONTEND=noninteractive
 # Build argument for hardware acceleration: "cpu" or "vulkan"
 ARG ACCELERATION=cpu
 
+# Portability, not speed. whisper.cpp defaults to `-march=native`, which bakes
+# in whatever the machine building the image supports -- and an image is meant
+# to run somewhere else. With this off, ggml enables SSE4.2/AVX/AVX2/BMI2
+# explicitly and leaves AVX-512 alone, so the image runs on any x86_64 since
+# Haswell instead of dying with SIGILL on an older host.
+ENV GGML_NATIVE=OFF
+
 WORKDIR /usr/src/callmind
 
 # Install build dependencies, Vulkan SDK headers & glslc shader compiler
