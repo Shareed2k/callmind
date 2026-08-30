@@ -42,6 +42,7 @@ async fn test_worker_pool_executes_job_and_shuts_down() {
         .build();
 
     let config = JobsConfig {
+        kinds: Vec::new(),
         workers: 2,
         poll_interval_ms: 50,
         lock_timeout_secs: 60,
@@ -120,6 +121,7 @@ async fn test_handler_panic_does_not_kill_the_worker() {
 
     // One worker, so a dead worker means nothing else can ever be processed.
     let config = JobsConfig {
+        kinds: Vec::new(),
         workers: 1,
         poll_interval_ms: 20,
         lock_timeout_secs: 60,
