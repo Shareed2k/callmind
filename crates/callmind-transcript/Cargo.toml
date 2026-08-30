@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 callmind-core.workspace = true
+callmind-config.workspace = true
 callmind-audio.workspace = true
 callmind-vad.workspace = true
 callmind-stt.workspace = true
@@ -24,3 +25,6 @@ thiserror.workspace = true
 tracing.workspace = true
 utoipa.workspace = true
 whatlang.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
