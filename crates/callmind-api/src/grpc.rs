@@ -274,6 +274,34 @@ impl Worker for WorkerService {
             .await
             .map_err(|e| Status::internal(format!("failed to store transcript: {e}")))?;
 
+        // The worker is the only party that opened the audio, so it is the only
+        // one that can say how long it is. Without this a call transcribed
+        // remotely kept a NULL duration, NULL channels and NULL sample rate --
+        // measured on a 4-second upload, all four columns empty -- because the
+        // pipeline records them right after the decode it no longer performs.
+        //
+        // Absent is fine and means "no change"; present must be complete, since
+        // a zero here would overwrite a good value from the ingest path with a
+        // meaningless one.
+        if let Some(audio) = req.audio {
+            if audio.duration_ms == 0 || audio.channels == 0 || audio.sample_rate == 0 {
+                return Err(Status::invalid_argument(
+                    "audio metadata must be complete: duration_ms, channels and \
+                     sample_rate are all required when the field is set",
+                ));
+            }
+            self.state
+                .call_repo
+                .set_audio_metadata(
+                    call_id,
+                    audio.duration_ms,
+                    u16::try_from(audio.channels).unwrap_or(u16::MAX),
+                    audio.sample_rate,
+                )
+                .await
+                .map_err(|e| Status::internal(format!("failed to store audio metadata: {e}")))?;
+        }
+
         // Returned to the queue without consuming an attempt, and as a kind no
         // remote worker leases. A worker has no way to know a transcript now
         // exists, so a job handed back as `ingest_recording` is one it takes
