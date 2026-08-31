@@ -393,6 +393,7 @@ async fn a_worker_can_lease_stream_and_submit() {
             worker_id: "gpu-box-2".into(),
             job_id: job.job_id.clone(),
             transcript: Some(sample_transcript(f.call_id)),
+            audio: None,
         })
         .await
         .expect_err("a non-holder must be refused");
@@ -410,23 +411,62 @@ async fn a_worker_can_lease_stream_and_submit() {
                 speakers: vec![],
                 segments: vec![],
             }),
+            audio: None,
         })
         .await
         .expect_err("an empty transcript must be refused");
     assert_eq!(err.code(), Code::InvalidArgument);
 
-    // 7. The real submission stores the transcript and requeues for analysis.
+    // 7. Audio metadata must be complete when it is sent at all. A zero would
+    //    replace a good value from the ingest path with a meaningless one.
+    let err = f
+        .client
+        .submit_transcript(v1::SubmitTranscriptRequest {
+            worker_id: "gpu-box-1".into(),
+            job_id: job.job_id.clone(),
+            transcript: Some(sample_transcript(f.call_id)),
+            audio: Some(v1::AudioMetadata {
+                duration_ms: 4_000,
+                channels: 0,
+                sample_rate: 16_000,
+            }),
+        })
+        .await
+        .expect_err("half-filled audio metadata must be refused");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    // 8. The real submission stores the transcript and requeues for analysis.
     let stored = f
         .client
         .submit_transcript(v1::SubmitTranscriptRequest {
             worker_id: "gpu-box-1".into(),
             job_id: job.job_id.clone(),
             transcript: Some(sample_transcript(f.call_id)),
+            audio: Some(v1::AudioMetadata {
+                duration_ms: 4_000,
+                channels: 1,
+                sample_rate: 16_000,
+            }),
         })
         .await
         .unwrap()
         .into_inner();
     assert_eq!(stored.segments_stored, 1);
+
+    // The worker is the only party that opened the audio, so it is the only one
+    // that can report its shape. Before this the call kept a NULL duration and
+    // the UI showed no length at all for anything transcribed remotely.
+    let after = f
+        .call_repo
+        .get_by_id(f.call_id)
+        .await
+        .unwrap()
+        .expect("call still there");
+    assert_eq!(
+        after.duration_ms,
+        Some(4_000),
+        "the duration the worker measured must reach the call"
+    );
 
     let saved = f
         .call_repo
