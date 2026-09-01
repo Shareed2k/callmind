@@ -195,6 +195,7 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         call_repo: call_repo.clone(),
         speaker_repo: call_repo.clone(),
         job_queue,
+        deliver_webhook: webhook_receiver.is_some(),
         plugins: plugins.clone(),
         remote_plugin_kinds: config.workers.plugin_kinds.clone(),
         storage: storage.clone(),

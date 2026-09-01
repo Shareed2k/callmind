@@ -224,11 +224,12 @@ async fn test_full_pipeline_e2e_real_audio() {
         let transcriber = transcriber.clone();
         let analysis_engine = analysis_engine.clone();
         let search_engine = search_engine.clone();
-        move || {
+        move |deliver_webhook: bool| {
             let handler: Arc<dyn callmind_jobs::JobHandler> = Arc::new(CallPipelineHandler {
                 call_repo: call_repo.clone(),
                 speaker_repo: call_repo.clone(),
                 job_queue: Some(job_queue.clone()),
+                deliver_webhook,
                 plugins: Vec::new(),
                 remote_plugin_kinds: vec!["acoustic-emotions".to_string()],
                 storage: storage.clone(),
@@ -257,7 +258,7 @@ async fn test_full_pipeline_e2e_real_audio() {
     let mut worker_pool = WorkerPool::new(
         job_repo.clone(),
         call_repo.clone(),
-        make_registry(),
+        make_registry(true),
         jobs_config.clone(),
         cancellation_token.clone(),
     );
@@ -356,13 +357,22 @@ async fn test_full_pipeline_e2e_real_audio() {
     // Transcription is the expensive stage; a crash or retryable failure after it
     // used to throw the work away. Detected here by planting a marker in the
     // stored transcript: if the pipeline re-transcribes, the marker disappears.
+    // Kept before the marker replaces it: a later step needs a transcript the
+    // analyser will actually accept, and one the pipeline itself produced is
+    // the only kind guaranteed to be that.
+    let real_transcript_json = call_repo
+        .get_transcript_json(call.id)
+        .await
+        .unwrap()
+        .expect("the first run stored a transcript");
+
     let marker = r#"{"call_id":"00000000-0000-0000-0000-0000000000ff","languages":[],"speakers":[],"segments":[]}"#;
     call_repo.save_transcript(call.id, marker).await.unwrap();
 
     let run_again = |kind: JobKind, payload: serde_json::Value| {
         let job_repo = job_repo.clone();
         let call_repo = call_repo.clone();
-        let registry = make_registry();
+        let registry = make_registry(true);
         let jobs_config = jobs_config.clone();
         async move {
             // Reset first: the call is already `Completed` from the run above,
@@ -460,6 +470,119 @@ async fn test_full_pipeline_e2e_real_audio() {
             .as_deref(),
         Some(marker),
         "an analysis job must not re-transcribe what a worker just handed over"
+    );
+
+    // 10. A call a remote worker transcribed still dispatches its plugin jobs.
+    //
+    //     Plugin dispatch used to live inside the transcription branch, so a
+    //     call whose transcript arrived over gRPC -- reaching this handler as
+    //     `analyze_call`, with the transcript already stored -- dispatched
+    //     nothing at all. Measured on a live run before this: the queue held
+    //     `analyze_call` and `deliver_webhook` and no plugin job whatsoever.
+    let worker_call = Call::new(
+        org_id,
+        Some("worker-transcribed.wav".to_string()),
+        CallDirection::Incoming,
+        None,
+        None,
+        None,
+    );
+    call_repo.create(&worker_call).await.unwrap();
+    // The pipeline looks the recording up before anything else, transcript or
+    // not. Points at the same stored object as the first call: this test is
+    // about dispatch, and the audio is never opened on this path.
+    call_repo
+        .add_recording(&Recording::new(
+            worker_call.id,
+            recording.storage_key.clone(),
+            recording.mime_type.clone(),
+            recording.file_size_bytes,
+            recording.sha256.clone(),
+        ))
+        .await
+        .unwrap();
+    call_repo
+        .save_transcript(worker_call.id, &real_transcript_json)
+        .await
+        .unwrap();
+
+    {
+        let token = CancellationToken::new();
+        job_repo
+            .enqueue(
+                &callmind_core::EnqueueJob::new(
+                    JobKind::AnalyzeCall,
+                    serde_json::json!({ "call_id": worker_call.id.to_string() }),
+                )
+                .with_call_id(worker_call.id),
+            )
+            .await
+            .unwrap();
+        let mut pool = WorkerPool::new(
+            job_repo.clone(),
+            call_repo.clone(),
+            make_registry(false),
+            jobs_config.clone(),
+            token.clone(),
+        );
+        pool.start();
+        wait_until("the analysis job to finish", || async {
+            job_repo
+                .list_by_call_id(worker_call.id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|job| {
+                    job.kind == JobKind::AnalyzeCall
+                        && job.status != callmind_core::JobStatus::Pending
+                })
+        })
+        .await;
+        let finished = job_repo
+            .list_by_call_id(worker_call.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|job| job.kind == JobKind::AnalyzeCall)
+            .expect("the analysis job");
+        assert_eq!(
+            finished.status,
+            callmind_core::JobStatus::Completed,
+            "the analysis run must reach the end, or the assertions below prove \
+             nothing: {:?}",
+            finished.last_error
+        );
+        token.cancel();
+        pool.wait().await;
+    }
+
+    let dispatched: Vec<_> = job_repo
+        .list_by_call_id(worker_call.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|job| job.kind == JobKind::Custom("acoustic-emotions".to_string()))
+        .collect();
+    assert_eq!(
+        dispatched.len(),
+        1,
+        "a worker-transcribed call must dispatch its plugin job exactly once"
+    );
+
+    // 11. And with no receiver configured, no delivery job is queued.
+    //
+    //     The enqueue used to be gated on the job queue merely existing, which
+    //     it also does when only plugin kinds are configured -- so every
+    //     completed call left a `deliver_webhook` job that nothing had a
+    //     handler for, pending forever. This run had `deliver_webhook: false`.
+    assert!(
+        !job_repo
+            .list_by_call_id(worker_call.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|job| job.kind == JobKind::DeliverWebhook),
+        "no receiver is configured, so nothing should be queued for delivery"
     );
 }
 
