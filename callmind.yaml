@@ -31,15 +31,15 @@ jobs:
   # transcription and hands the job back as `analyze_call`, and that stage needs
   # the LLM and the database, so it runs here. Lower this when most
   # transcription happens on a GPU box, do not zero it.
-  workers: 4
+  workers: 1
   # Job kinds this host's own workers take. Empty means everything it can
   # handle, which is right for a single machine. Name them to hand transcription
   # to a GPU box -- the local pool polls twice a second and a worker over a
   # network cannot win that race otherwise:
-  #   kinds: ["analyze_call", "deliver_webhook"]
+  kinds: ["analyze_call", "deliver_webhook"]
   # `analyze_call` must stay in any list: it is the stage a remote worker hands
   # back, and it needs the LLM and the database.
-  kinds: []
+  #kinds: []
   poll_interval_ms: 500
   lock_timeout_secs: 600
   max_attempts: 3
@@ -118,7 +118,7 @@ watcher:
 workers:
   # Remote processing workers: separate programs, possibly closed-source, that
   # lease jobs over gRPC. They never touch the database.
-  enabled: false
+  enabled: true
   # Loopback needs no certificate. Any other address does, and the server
   # refuses to start without one -- a worker downloads recordings.
   bind: "127.0.0.1:8081"
@@ -134,6 +134,20 @@ workers:
   # worker leases the kind as "plugin:<name>": "acoustic-emotions" here is
   # "plugin:acoustic-emotions" on the wire. ASCII letters, digits, - and _ only.
   plugin_kinds: []
+  # Plugins this host starts and keeps running itself. A local plugin is a
+  # worker like any other -- it dials the listener above and leases
+  # `plugin:<name>` -- so it needs no configuration file and no standing secret:
+  # the endpoint, its id and its kind arrive in its environment. Its name is
+  # dispatched whether or not it also appears in plugin_kinds above.
+  #
+  # Unlike a remote worker, a job dispatched for one of these cannot sit
+  # unclaimed forever, because the process that claims it is one this server
+  # owns and restarts.
+  # local_plugins:
+  #   - name: "acoustic-emotions"
+  #     command: "/opt/callmind/plugins/emotions"
+  #     args: []
+  local_plugins: []
 
 # POST each finished call to an HTTP receiver (n8n, a Shortcut, anything that
 # speaks HTTP). Disabled while url is empty -- this is the one setting that sends

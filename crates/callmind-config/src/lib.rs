@@ -465,6 +465,45 @@ pub struct WorkersConfig {
     /// Plugin kinds dispatched after every transcript.
     #[serde(default)]
     pub plugin_kinds: Vec<String>,
+
+    /// Plugins the host starts and keeps running itself.
+    ///
+    /// A local plugin is a worker like any other -- it dials this server and
+    /// leases `plugin:<name>` -- so nothing about the protocol changes. What
+    /// changes is that a job dispatched for it cannot sit unclaimed forever,
+    /// because the process that would claim it is one this server owns.
+    #[serde(default)]
+    pub local_plugins: Vec<LocalPluginConfig>,
+}
+
+/// A plugin the host launches as a child process.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct LocalPluginConfig {
+    /// Its plugin name, which is also the job kind it leases and the key its
+    /// result is stored under.
+    pub name: String,
+    /// The executable to run.
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl WorkersConfig {
+    /// Every plugin kind the pipeline should dispatch: the ones named outright,
+    /// plus the ones implied by a locally launched plugin.
+    ///
+    /// Merged rather than requiring both lists, because naming a plugin twice to
+    /// make it run is the kind of configuration that is wrong half the time.
+    #[must_use]
+    pub fn dispatch_kinds(&self) -> Vec<String> {
+        let mut kinds = self.plugin_kinds.clone();
+        for plugin in &self.local_plugins {
+            if !kinds.contains(&plugin.name) {
+                kinds.push(plugin.name.clone());
+            }
+        }
+        kinds
+    }
 }
 
 /// Server certificate and key for the worker listener.
@@ -506,6 +545,36 @@ impl WorkersConfig {
                      use ASCII letters, digits, '-' and '_'."
                 ));
             }
+        }
+
+        for plugin in &self.local_plugins {
+            if plugin.name.is_empty()
+                || !plugin
+                    .name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(format!(
+                    "workers.local_plugins entry {:?} is not a usable plugin name; \
+                     use ASCII letters, digits, '-' and '_'.",
+                    plugin.name
+                ));
+            }
+            if plugin.command.trim().is_empty() {
+                return Err(format!(
+                    "workers.local_plugins entry {:?} has no command to run.",
+                    plugin.name
+                ));
+            }
+        }
+
+        // Launched by this server, which must therefore be listening.
+        if !self.local_plugins.is_empty() && !self.enabled {
+            return Err(
+                "workers.local_plugins is set but workers.enabled is false, so the plugins \
+                 would start with nothing to connect to."
+                    .into(),
+            );
         }
 
         if !self.enabled {
