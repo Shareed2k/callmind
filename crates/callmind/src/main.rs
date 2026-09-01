@@ -6,6 +6,7 @@
 //! call.
 
 pub mod models_cli;
+pub mod supervisor;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -188,15 +189,16 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     // for -- so the pipeline is handed a queue only when one of those applies.
     let webhook_receiver = config.outbound_webhook.url.clone();
     let job_queue: Option<Arc<dyn callmind_db::JobRepository>> = (webhook_receiver.is_some()
-        || !config.workers.plugin_kinds.is_empty())
+        || !config.workers.dispatch_kinds().is_empty())
     .then(|| job_repo.clone() as Arc<dyn callmind_db::JobRepository>);
 
     let pipeline_handler = CallPipelineHandler {
         call_repo: call_repo.clone(),
         speaker_repo: call_repo.clone(),
         job_queue,
+        deliver_webhook: webhook_receiver.is_some(),
         plugins: plugins.clone(),
-        remote_plugin_kinds: config.workers.plugin_kinds.clone(),
+        remote_plugin_kinds: config.workers.dispatch_kinds(),
         storage: storage.clone(),
         transcriber,
         analyzer: analysis_engine.clone(),
@@ -359,6 +361,25 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
         });
     }
 
+    // Plugins this server owns. Started after the listener they will dial, and
+    // told where to call in their environment -- the worker protocol is the same
+    // one a remote GPU box speaks, so a local plugin needs no configuration file
+    // and no standing secret of its own.
+    let supervisor = if config.workers.local_plugins.is_empty() {
+        None
+    } else {
+        let scheme = if config.workers.tls.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        Some(supervisor::PluginSupervisor::start(
+            &config.workers.local_plugins,
+            &format!("{scheme}://{}", config.workers.bind),
+            &cancellation_token,
+        ))
+    };
+
     let app = create_router(app_state);
 
     let listener = tokio::net::TcpListener::bind(&config.server.bind)
@@ -413,23 +434,40 @@ async fn run_serve(config_path: Option<PathBuf>) -> Result<()> {
     // not help it finish — it only risks SIGKILL arriving before the requeue
     // below runs, which is what happened against Docker's 10s default.
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-    if tokio::time::timeout(SHUTDOWN_TIMEOUT, worker_pool.wait())
+    let workers_stopped_in_time = tokio::time::timeout(SHUTDOWN_TIMEOUT, worker_pool.wait())
         .await
-        .is_err()
+        .is_ok();
+
+    // Before the requeue below, so a plugin's lease is one of the ones returned
+    // rather than a race against it.
+    if let Some(supervisor) = supervisor {
+        if tokio::time::timeout(SHUTDOWN_TIMEOUT, supervisor.wait())
+            .await
+            .is_err()
+        {
+            warn!("Local plugins did not stop within {SHUTDOWN_TIMEOUT:?}");
+        }
+    }
+
+    // Unconditionally, not only when the pool overran. A job leased by a remote
+    // worker or a local plugin is not the pool's to finish, and killing those
+    // processes at shutdown leaves the lease behind: with this inside the
+    // timeout branch, a clean stop left such a job `running` until the stale
+    // lock reaper came round, ten minutes into the next start.
+    match job_repo
+        .requeue_all_running("Interrupted by server shutdown")
+        .await
     {
+        Ok(0) => {}
+        Ok(count) => info!("Requeued {count} interrupted job(s) for the next start"),
+        Err(err) => error!("Failed to requeue interrupted jobs: {err}"),
+    }
+
+    if !workers_stopped_in_time {
         warn!(
-            "Workers did not stop within {} seconds; returning active jobs to the queue",
+            "Workers did not stop within {} seconds; returning active work to the queue",
             SHUTDOWN_TIMEOUT.as_secs()
         );
-
-        match job_repo
-            .requeue_all_running("Interrupted by server shutdown")
-            .await
-        {
-            Ok(0) => {}
-            Ok(count) => info!("Requeued {count} interrupted job(s) for the next start"),
-            Err(err) => error!("Failed to requeue interrupted jobs: {err}"),
-        }
 
         match call_repo.reset_processing_to_pending().await {
             Ok(0) => {}

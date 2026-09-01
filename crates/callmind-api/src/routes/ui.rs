@@ -5,7 +5,8 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use callmind_core::CallId;
 use callmind_search::AskCallsRequest;
 use callmind_ui::{
-    render_analytics_dashboard, render_ask_page, render_call_detail, render_calls_list,
+    AwaitedPlugin, render_analytics_dashboard, render_ask_page, render_call_detail,
+    render_calls_list,
 };
 use serde::Deserialize;
 
@@ -117,12 +118,38 @@ pub async fn call_detail_page(
 
     let plugin_results = state.call_repo.list_plugin_results(id).await?;
 
+    // A plugin job for a kind no worker leases is never reaped -- the reaper
+    // only reclaims leases, and nobody ever took this one -- so it sits pending
+    // while the call completes and the page looks finished. Name it instead.
+    let reported: std::collections::HashSet<&str> = plugin_results
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let awaited: Vec<AwaitedPlugin> = state
+        .job_repo
+        .list_by_call_id(id)
+        .await?
+        .into_iter()
+        .filter_map(|job| match &job.kind {
+            callmind_core::JobKind::Custom(name) if !reported.contains(name.as_str()) => {
+                Some(AwaitedPlugin {
+                    plugin: name.clone(),
+                    status: job.status,
+                    since: job.created_at,
+                    error: job.last_error,
+                })
+            }
+            _ => None,
+        })
+        .collect();
+
     let html = render_call_detail(
         &call,
         transcript.as_ref(),
         analysis.as_ref(),
         last_error.as_deref(),
         &plugin_results,
+        &awaited,
         &state.templates,
     );
     Ok(Html(html).into_response())
