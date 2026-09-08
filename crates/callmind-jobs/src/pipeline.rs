@@ -25,6 +25,13 @@ pub struct CallPipelineHandler {
     /// dispatched to remote plugins. `None` when neither is configured, which
     /// is the default: nothing leaves the machine unless somebody asked for it.
     pub job_queue: Option<Arc<dyn callmind_db::JobRepository>>,
+    /// Whether a finished call should be handed to an outbound webhook.
+    ///
+    /// Separate from `job_queue` being present, which it also is when only
+    /// plugin kinds are configured. Gating on the queue alone enqueued a
+    /// delivery job for every completed call with nothing registered to handle
+    /// it -- one permanent orphan per call.
+    pub deliver_webhook: bool,
     /// Plugin kinds handed to remote workers after transcription.
     ///
     /// Names only: the core dispatches a job per kind and stores whatever comes
@@ -330,34 +337,42 @@ impl JobHandler for CallPipelineHandler {
                     }
                 }
 
-                // Remote plugins get a job each, leased by a worker that declares the
-                // kind. A kind nobody serves leaves a job pending -- visible in the
-                // queue rather than silently skipped.
-                //
-                // A failed enqueue is logged, not propagated: the transcript is
-                // already committed, and this whole branch is skipped on a retry
-                // once the transcript is stored (see the `Some(Ok(existing))` arm
-                // above). Failing the job here would only pay for another LLM
-                // analysis pass without ever retrying the enqueue itself.
-                for kind in &self.remote_plugin_kinds {
-                    let request = callmind_core::EnqueueJob::new(
-                        callmind_core::JobKind::Custom(kind.clone()),
-                        serde_json::json!({ "call_id": call_id.to_string() }),
-                    )
-                    .with_call_id(call_id);
-
-                    if let Some(queue) = &self.job_queue {
-                        if let Err(e) = queue.enqueue(&request).await {
-                            tracing::warn!(
-                                "Failed to dispatch the '{kind}' plugin job for call {call_id}: {e}"
-                            );
-                        }
-                    }
-                }
-
                 transcript
             }
         };
+
+        // Remote plugins get a job each, leased by a worker that declares the
+        // kind. Dispatched wherever the transcript came from: this used to live
+        // inside the transcription branch, so a call transcribed by a remote
+        // worker -- which reaches this handler as `analyze_call`, with the
+        // transcript already stored -- never dispatched a single plugin job.
+        //
+        // Guarded against duplicates by what is already queued, because this
+        // path runs again on every retry of the analysis stage. A failed enqueue
+        // is logged, not propagated: the transcript is committed either way, and
+        // failing here would pay for another LLM pass without retrying the
+        // enqueue itself.
+        if let Some(queue) = &self.job_queue {
+            if !self.remote_plugin_kinds.is_empty() {
+                let existing = queue.list_by_call_id(call_id).await.unwrap_or_default();
+                for kind in &self.remote_plugin_kinds {
+                    let job_kind = callmind_core::JobKind::Custom(kind.clone());
+                    if existing.iter().any(|job| job.kind == job_kind) {
+                        continue;
+                    }
+                    let request = callmind_core::EnqueueJob::new(
+                        job_kind,
+                        serde_json::json!({ "call_id": call_id.to_string() }),
+                    )
+                    .with_call_id(call_id);
+                    if let Err(e) = queue.enqueue(&request).await {
+                        tracing::warn!(
+                            "Failed to dispatch the '{kind}' plugin job for call {call_id}: {e}"
+                        );
+                    }
+                }
+            }
+        }
 
         if ctx.cancellation_token.is_cancelled() {
             return Err(JobExecutionError::Cancelled);
@@ -446,7 +461,7 @@ impl JobHandler for CallPipelineHandler {
         //
         // Deliberately carries no phone numbers: this payload leaves the machine,
         // and a receiver that wants them can ask for the call by id.
-        if let Some(queue) = &self.job_queue {
+        if let (true, Some(queue)) = (self.deliver_webhook, &self.job_queue) {
             let payload = serde_json::json!({
                 "event": "call.completed",
                 "call_id": call_id.to_string(),

@@ -23,6 +23,9 @@ pub fn render_call_detail(
     // Stored plugin results as `(plugin, payload_json)`. Rendered through the
     // template registry, so a plugin can supply its own view.
     plugin_results: &[(String, String)],
+    // Plugins that were dispatched and have not reported. Rendered so a kind
+    // nobody serves is visible rather than silently absent.
+    awaited_plugins: &[AwaitedPlugin],
     templates: &crate::templates::TemplateRegistry,
 ) -> String {
     let call_id = call.id;
@@ -322,7 +325,11 @@ pub fn render_call_detail(
         .unwrap_or_default();
 
     // Anything a plugin contributed, such as acoustic per-speaker emotion.
-    let plugin_html = templates.render_all_plugins(plugin_results);
+    let plugin_html = format!(
+        "{}{}",
+        awaited_plugins_html(awaited_plugins),
+        templates.render_all_plugins(plugin_results)
+    );
 
     let body = format!(
         r#"
@@ -667,9 +674,141 @@ fn urlencoding_simple(s: &str) -> String {
     encoded
 }
 
+/// A plugin the pipeline dispatched a job for, whose result has not arrived.
+///
+/// Rendered because the alternative is silence: a job for a kind no worker
+/// leases is never reaped -- the stale-lease reaper only touches leases, and
+/// nobody ever took this one -- so it sits `pending` indefinitely while the call
+/// completes and the page looks finished.
+pub struct AwaitedPlugin {
+    pub plugin: String,
+    pub status: callmind_core::JobStatus,
+    /// When the job was created, so the page can say how long this has gone on.
+    pub since: chrono::DateTime<chrono::Utc>,
+    pub error: Option<String>,
+}
+
+/// Render the awaited-plugin notice, or nothing when every plugin has reported.
+fn awaited_plugins_html(awaited: &[AwaitedPlugin]) -> String {
+    if awaited.is_empty() {
+        return String::new();
+    }
+
+    let mut rows = String::new();
+    for entry in awaited {
+        let plugin = html_escape::encode_text(&entry.plugin);
+        let waited = humanise(chrono::Utc::now() - entry.since);
+        let (icon, state) = match entry.status {
+            callmind_core::JobStatus::Running => ("⏳", format!("running for {waited}")),
+            callmind_core::JobStatus::Failed => ("⚠️", format!("failed after {waited}")),
+            callmind_core::JobStatus::Cancelled => ("⃠", format!("cancelled after {waited}")),
+            // Pending covers the case this whole section exists for: dispatched,
+            // and never picked up because nothing serves that kind.
+            _ => ("…", format!("waiting {waited} for a worker")),
+        };
+        let detail = match &entry.error {
+            Some(err) => format!(
+                r#"<div style="color:#fca5a5; font-family:monospace; font-size:0.8rem; margin-top:0.25rem; word-break:break-word;">{}</div>"#,
+                html_escape::encode_text(err)
+            ),
+            None => String::new(),
+        };
+        let _ = write!(
+            rows,
+            r#"<li style="margin-bottom:0.4rem;"><span style="margin-right:0.4rem;">{icon}</span><strong>{plugin}</strong> — {state}{detail}</li>"#
+        );
+    }
+
+    format!(
+        r#"
+        <div style="background: rgba(148,163,184,0.12); border: 1px solid var(--border, #334155); border-radius: 0.5rem; padding: 1rem; margin-bottom: 1.5rem;">
+          <div style="font-size:0.9rem; font-weight:600; margin-bottom:0.5rem;">Plugin results not in yet</div>
+          <ul style="list-style:none; padding:0; margin:0; font-size:0.85rem;">{rows}</ul>
+        </div>
+        "#
+    )
+}
+
+/// A duration as the page should say it: coarse on purpose, because the reader
+/// only needs to tell "a moment ago" from "nothing is serving this".
+fn humanise(elapsed: chrono::Duration) -> String {
+    let minutes = elapsed.num_minutes().max(0);
+    if minutes < 1 {
+        "less than a minute".to_string()
+    } else if minutes < 60 {
+        format!("{minutes}m")
+    } else if minutes < 60 * 24 {
+        format!("{}h", minutes / 60)
+    } else {
+        format!("{}d", minutes / (60 * 24))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::escape_attribute;
+    use super::{AwaitedPlugin, awaited_plugins_html, escape_attribute};
+    use callmind_core::JobStatus;
+    use chrono::{Duration, Utc};
+
+    /// A plugin kind nobody serves leaves its job pending forever -- the stale
+    /// lease reaper never touches it, because nobody ever took it. Before this
+    /// the page showed nothing at all: the call completed, the plugin section
+    /// was simply absent, and there was no way to tell "no worker" from "this
+    /// plugin has nothing to say".
+    #[test]
+    fn a_plugin_nobody_serves_is_named_on_the_page() {
+        let html = awaited_plugins_html(&[AwaitedPlugin {
+            plugin: "acoustic-emotions".to_string(),
+            status: JobStatus::Pending,
+            since: Utc::now() - Duration::hours(3),
+            error: None,
+        }]);
+
+        assert!(
+            html.contains("acoustic-emotions"),
+            "names the plugin: {html}"
+        );
+        assert!(
+            html.contains("3h"),
+            "says how long it has waited, which is what separates \"nobody is \
+             serving this\" from \"it started a moment ago\": {html}"
+        );
+    }
+
+    /// A plugin that ran and failed is a different situation from one nobody
+    /// took, and the page has to say which.
+    #[test]
+    fn a_failed_plugin_shows_its_error() {
+        let html = awaited_plugins_html(&[AwaitedPlugin {
+            plugin: "acoustic-emotions".to_string(),
+            status: JobStatus::Failed,
+            since: Utc::now() - Duration::minutes(5),
+            error: Some("model file missing".to_string()),
+        }]);
+        assert!(html.contains("model file missing"), "{html}");
+    }
+
+    /// An error message is worker-supplied text on a page that renders it.
+    #[test]
+    fn a_plugin_error_cannot_inject_markup() {
+        let html = awaited_plugins_html(&[AwaitedPlugin {
+            plugin: "<script>alert(1)</script>".to_string(),
+            status: JobStatus::Failed,
+            since: Utc::now(),
+            error: Some("<img src=x onerror=alert(2)>".to_string()),
+        }]);
+        assert!(
+            !html.contains("<script>"),
+            "plugin name must be escaped: {html}"
+        );
+        assert!(!html.contains("<img"), "error must be escaped: {html}");
+    }
+
+    /// The common case: everything reported, so nothing is said.
+    #[test]
+    fn nothing_is_rendered_when_every_plugin_has_reported() {
+        assert!(awaited_plugins_html(&[]).is_empty());
+    }
 
     #[test]
     fn attribute_escaping_cannot_break_out() {
