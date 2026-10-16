@@ -99,7 +99,7 @@ tower = { version = "0.5", features = ["util", "timeout"] }
 tower-http = { version = "0.7", features = ["cors", "trace", "compression-gzip", "limit"] }
 
 symphonia = { version = "0.6", features = ["all"] }
-rubato = "0.16"
+rubato = "5.0"
 whisper-rs = { version = "0.16", default-features = false }
 
 serde = { version = "1.0", features = ["derive"] }
