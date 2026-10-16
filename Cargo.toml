@@ -129,7 +129,7 @@ sha2 = "0.11"
 hex = "0.4"
 tempfile = "3.17"
 async-trait = "0.1"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 html-escape = "0.2"
 whatlang = "0.18"
 
