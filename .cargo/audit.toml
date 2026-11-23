@@ -2,18 +2,6 @@
 
 [advisories]
 ignore = [
-    # rsa 0.9.10 — Marvin Attack timing sidechannel (medium, no fixed release).
-    #
-    # Not reachable: rsa enters Cargo.lock only as an optional dependency of
-    # sqlx-mysql, and this workspace enables only sqlx's sqlite backend.
-    # `cargo tree -i rsa --target all` reports "nothing to print", i.e. no
-    # activated path exists and it is never compiled in.
-    #
-    # Revisit if a MySQL backend is ever added — see the driver match in
-    # crates/callmind/src/main.rs, which currently rejects everything but
-    # "sqlite".
-    "RUSTSEC-2023-0071",
-
     # rkyv 0.7.46 — out-of-bounds reads on archives containing Rc/Arc.
     #
     # Not reachable, same shape as the entry above: `rust_decimal` (pulled in by
